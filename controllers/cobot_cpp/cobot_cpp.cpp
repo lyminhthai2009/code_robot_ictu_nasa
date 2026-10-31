@@ -40,7 +40,8 @@ enum TrackState {
     STATE_SPEED_BUMP,         // Gờ giảm tốc 1, 2: Tốc độ đầm, bám tâm ổn định, dập tắt rung lắc
     STATE_LOOP2_ALIGN,        // Vòng 2: Tiến thêm khoảng an toàn (trục bánh xe tới tâm ngã tư)
     STATE_LOOP2_TURN,         // Vòng 2: Xoay phải 90 độ dứt khoát bắt nhánh rẽ tắt
-    STATE_BRIDGE_CLIMB        // Dốc cầu 3D 5cm: Vận tốc tối ưu 170 PWM, bám tâm kín kẽ, chống văng dốc
+    STATE_BRIDGE_CLIMB,       // Dốc cầu 3D 5cm: Vận tốc tối ưu 170 PWM, bám tâm kín kẽ, chống văng dốc
+    STATE_FINISH_DECEL        // Về đích trên line đỏ: Giảm tốc êm ái tiến sâu vào vạch đỏ rồi dừng hẳn
 };
 
 // ============================================================================
@@ -172,13 +173,23 @@ public:
         bool is_blue  = (strcmp(color_tag, "BLUE (GO / DOC CAU)") == 0);
 
         // ====================================================================
-        // 1. DỪNG TẠI VẠCH ĐỎ FINISH (Sau khi đã hoàn thành đường đua)
+        // 1. XỬ LÝ VẠCH ĐỎ (XUẤT PHÁT TRÊN LINE ĐỎ & VỀ ĐÍCH DỪNG TRÊN LINE ĐỎ)
         // ====================================================================
-        if (is_red && s.elapsed_sec > 10.0 && (cross_count >= 3 || blue_zone_count >= 3)) {
-            finished = true;
-            pwm_left = 0;
-            pwm_right = 0;
+        if (s.elapsed_sec < 2.5 && is_red && sum_ir < 0.15f) {
+            // Khi xuất phát trên vạch đỏ: nếu mắt IR chưa bắt được vạch đỏ (robot thật)
+            // thì chạy thẳng ổn định tiến ra vạch xanh / đen
+            pwm_left  = (int)base_pwm;
+            pwm_right = (int)base_pwm;
             return;
+        }
+
+        if (is_red && s.elapsed_sec > 10.0 && (cross_count >= 3 || blue_zone_count >= 3)) {
+            if (state != STATE_FINISH_DECEL) {
+                state = STATE_FINISH_DECEL;
+                state_enter_time = s.elapsed_sec;
+                printf("[FINISH RED LINE] Reached Red Line at t=%.2f s! Decelerating into finish zone...\n", s.elapsed_sec);
+                fflush(stdout);
+            }
         }
 
         // ====================================================================
@@ -361,7 +372,21 @@ public:
         float active_Kd = Kd;
         float max_turn_clamp = 250.0f;
 
-        if (state == STATE_LOOP1_NO_SHORTCUT) {
+        if (state == STATE_FINISH_DECEL) {
+            double finish_dur = s.elapsed_sec - state_enter_time;
+            if (finish_dur > 0.46) {
+                finished = true;
+                pwm_left = 0;
+                pwm_right = 0;
+                return;
+            }
+            // Giảm tốc mượt mà từ 180 xuống 55 PWM tiến sâu vào giữa vạch đỏ
+            float ramp = 1.0f - (float)(finish_dur / 0.46);
+            target_base = 55.0f + 125.0f * ramp;
+            active_Kp = 20.0f;
+            active_Kd = 1.0f;
+            max_turn_clamp = 30.0f;
+        } else if (state == STATE_LOOP1_NO_SHORTCUT) {
             // Khi xuyên qua ngã tư Vòng 1: bám tâm nhẹ, khóa đạo hàm chống giật
             active_Kp = 18.0f;
             active_Kd = 0.0f;
@@ -487,10 +512,15 @@ public:
 
 using namespace webots;
 
-static void drawCleanHudLine(Supervisor *robot, int id, const char *text,
-                             double x, double y, double font_size, int color) {
-    robot->setLabel(id + 50, text, x + 0.0012, y + 0.0018, font_size, 0x000000, 0.20, "Lucida Console");
-    robot->setLabel(id, text, x, y, font_size, color, 0.0, "Lucida Console");
+static void drawBoldRedText(Supervisor *robot, int id, const char *text,
+                            double x, double y, double font_size) {
+    // Đổ bóng đen viền xung quanh để tạo chiều sâu và độ tương phản cao
+    robot->setLabel(id + 1, text, x + 0.0012, y + 0.0015, font_size, 0x000000, 0.35, "Arial Black");
+    // Lớp tăng cường nét đậm (faux bold)
+    robot->setLabel(id + 2, text, x + 0.0006, y,          font_size, 0xFF0000, 0.00, "Arial Black");
+    robot->setLabel(id + 3, text, x,          y + 0.0006, font_size, 0xFF0000, 0.00, "Arial Black");
+    // Lớp chính font Arial Black chữ đậm, màu đỏ (0xFF0000)
+    robot->setLabel(id,     text, x,          y,          font_size, 0xFF0000, 0.00, "Arial Black");
 }
 
 int main(int argc, char **argv) {
@@ -498,6 +528,11 @@ int main(int argc, char **argv) {
     int timeStep = (int)robot->getBasicTimeStep();
     std::string robotName = robot->getName();
     bool isSecondRobot = (robotName == "COBOT_ICTU_2");
+
+    // Xoá sạch toàn bộ các nhãn chữ cũ trên màn hình
+    for (int i = 0; i <= 100; i++) {
+        robot->setLabel(i, "", 0.0, 0.0, 0.0, 0x000000, 0.0);
+    }
 
     Motor *leftMotor = robot->getMotor("left_motor");
     Motor *rightMotor = robot->getMotor("right_motor");
@@ -618,6 +653,8 @@ int main(int argc, char **argv) {
         const double *rotMatrix = selfNode->getOrientation();
 
         bool on_bridge = (curPos[2] > 0.024 && curPos[0] < 0.08 && curPos[0] > -0.48 && curPos[1] < -0.52 && curPos[1] > -0.72);
+        // Đường thẳng chứa vạch đỏ (X từ -0.59 đến -0.25) và vạch xanh (X từ -0.25 đến -0.19) tại Y = +0.620
+        bool on_red_green_line = (!on_bridge && curPos[1] > 0.50 && curPos[1] < 0.74 && curPos[0] > -0.68 && curPos[0] < -0.18);
         const double ir_y_offsets[4] = { +0.027, +0.009, -0.009, -0.027 };
 
         int white_sensors = 0;
@@ -627,6 +664,21 @@ int main(int argc, char **argv) {
                 // (Trong thực tế TCRT5000 bắt vạch băng dính đen 22mm chạy dọc tâm cầu Y = -0.620)
                 double sensor_y = curPos[1] + rotMatrix[3] * 0.085 + rotMatrix[4] * ir_y_offsets[i] + rotMatrix[5] * (-0.006);
                 double dist = fabs(sensor_y - (-0.620));
+                if (dist <= 0.009) {
+                    sData.ir[i] = 1.0f;
+                    sData.raw_ir[i] = 1024;
+                } else if (dist >= 0.017) {
+                    sData.ir[i] = 0.07f;
+                    sData.raw_ir[i] = 468;
+                } else {
+                    float frac = (float)((0.017 - dist) / (0.017 - 0.009));
+                    sData.ir[i] = 0.07f + 0.93f * frac;
+                    sData.raw_ir[i] = (int)(468 + (1024 - 468) * frac);
+                }
+            } else if (on_red_green_line) {
+                // Mô phỏng cảm biến hồng ngoại dò vạch trên đoạn vạch đỏ/vạch xanh xuất phát & về đích (Y = +0.620)
+                double sensor_y = curPos[1] + rotMatrix[3] * 0.085 + rotMatrix[4] * ir_y_offsets[i] + rotMatrix[5] * (-0.006);
+                double dist = fabs(sensor_y - (+0.620));
                 if (dist <= 0.009) {
                     sData.ir[i] = 1.0f;
                     sData.raw_ir[i] = 1024;
@@ -649,6 +701,7 @@ int main(int argc, char **argv) {
         }
 
         out_of_line_warning = (white_sensors == 4 && !brain.was_near_center);
+        (void)out_of_line_warning;
 
         const unsigned char *img = colorSensor->getImage();
         int width = colorSensor->getWidth();
@@ -691,52 +744,9 @@ int main(int argc, char **argv) {
 
         if (step_counter % 6 != 0) continue;
 
-        const char* state_names[] = {
-            "DO LINE PID (MUOT & NHANH)",
-            "VONG TRON 1 (KHOA THANG X)",
-            "GO GIAM TOC (GIU THANG LAI)",
-            "VONG TRON 2 (CAN CHINH AN TOAN)",
-            "VONG TRON 2 (XOAY PHAI RE TAT)",
-            "DOC CAU 3D 5CM (BAM TAM KIN)"
-        };
-
-        int id_base = isSecondRobot ? 20 : 0;
-        double x_col = isSecondRobot ? 0.52 : 0.012;
-        double font_sz = 0.048;
-        double dy = 0.032;
-
-        char line[6][160];
-        snprintf(line[0], sizeof(line[0]), "[%s] Time: %05.2f/150s | Retry: %d | Pin: %.2fV",
-                 robotName.c_str(), elapsed, retry_count, battery_voltage);
-        snprintf(line[1], sizeof(line[1]), "NgaTu X: %d | CumXanh: %d | Vong2: %s",
-                 brain.cross_count, brain.blue_zone_count,
-                 brain.loop2_shortcut ? "DI TAT" : "DI VONG");
-        snprintf(line[2], sizeof(line[2]), "PID: Kp=%.0f Kd=%.1f Base=%.0f | PWM[L:%+3d R:%+3d]",
-                 brain.Kp, brain.Kd, brain.base_pwm, pwm_l, pwm_r);
-        snprintf(line[3], sizeof(line[3]), "State: %s %s",
-                 state_names[brain.state],
-                 brain.finished ? "[VE DICH!]" : (out_of_line_warning ? "[! NGOAI LINE !]" : ""));
-        snprintf(line[4], sizeof(line[4]), "IR0-3: [%.2f | %.2f | %.2f | %.2f] | RGB(%3d,%3d,%3d)->%s",
-                 sData.ir[0], sData.ir[1], sData.ir[2], sData.ir[3],
-                 sData.r, sData.g, sData.b, brain.detectColorTag(sData.r, sData.g, sData.b));
-
-        int colors[5] = {
-            0x00FFAA,
-            0x70D6FF,
-            0xE0E0E0,
-            brain.finished ? 0x00FF44 : (out_of_line_warning ? 0xFF3333 : 0xFFD700),
-            0xFFFFFF
-        };
-
-        for (int i = 0; i < 5; i++) {
-            drawCleanHudLine(robot, id_base + i, line[i], x_col, 0.012 + i * dy, font_sz, colors[i]);
-        }
-
+        // Hiển thị duy nhất dòng chữ BLENDER-ROBLOX STUDIO (chữ đậm, màu đỏ)
         if (!isSecondRobot) {
-            snprintf(line[5], sizeof(line[5]),
-                     "[Phim tat] W/S:TocDo | E/Q:Kp | D/A:Kd | T:Vong2 | R:VeStart | N:VanMoi | L/K/J:AnhSang | M:Line(%dmm)",
-                     line_width_options[line_width_idx]);
-            drawCleanHudLine(robot, 15, line[5], 0.012, 0.94, 0.045, 0xA0FFD0);
+            drawBoldRedText(robot, 0, "BLENDER-ROBLOX STUDIO", 0.02, 0.02, 0.065);
         }
     }
 
@@ -746,28 +756,102 @@ int main(int argc, char **argv) {
 
 #else
 // ============================================================================
-// PHẦN 4: CODE NẠP THẲNG LÊN MẠCH THẬT (KM-11-102 + KMM-11-100 + GA12-N20 5V)
+// PHẦN 4: CODE NẠP THẲNG LÊN MẠCH THẬT ESP32 (KM-11-102 + KMM-11-100 + GA12-N20)
 // ============================================================================
 #include <Arduino.h>
 #include <Wire.h>
 
-const int PIN_IR[4] = {A0, A1, A2, A3};  // 4 mắt cảm biến hồng ngoại dò đường
-const int PIN_BAT   = A7;                // Chân đo áp pin (nếu mạch có nối cầu phân áp)
-const int ENA = 5, IN1 = 4, IN2 = 3;     // Động cơ Trái (KM-23-101: GA12-N20 5V 300RPM)
-const int ENB = 6, IN3 = 7, IN4 = 8;     // Động cơ Phải (KM-23-101: GA12-N20 300RPM)
+// Sơ đồ chân phần cứng ESP32 bộ kit thực tế:
+#define PWM_PIN_L_A 2
+#define PWM_PIN_L_B 10
+#define PWM_PIN_R_A 6
+#define PWM_PIN_R_B 5
 
-int ir_min_cal[4] = {220, 220, 220, 220};
-int ir_max_cal[4] = {720, 720, 720, 720};
-bool ir_inverted  = false;
+#define CH_L_A 0
+#define CH_L_B 1
+#define CH_R_A 2
+#define CH_R_B 3
+
+#define SENSOR_1_PIN 4  // Mắt Trái ngoài (IR0)
+#define SENSOR_2_PIN 3  // Mắt Trái trong  (IR1)
+#define SENSOR_3_PIN 1  // Mắt Phải trong  (IR2)
+#define SENSOR_4_PIN 0  // Mắt Phải ngoài (IR3)
+
+const int PIN_IR[4] = {SENSOR_1_PIN, SENSOR_2_PIN, SENSOR_3_PIN, SENSOR_4_PIN};
+
+#define W_LED_ON  20  // Đèn LED trắng chiếu sáng cảm biến màu TCS34725
+#define IR_LED_ON 21  // Đèn LED hồng ngoại chiếu sàn cho 4 mắt dò line
+
+const int MIN_N20_PWM = 45;
+float right_motor_trim = 1.00f;
+
+CobotBrain brain;
+
+int ir_white_cal[4] = {3200, 3200, 3200, 3200};
+int ir_black_cal[4] = {1200, 1200, 1200, 1200};
 
 const uint8_t TCS34725_ADDR = 0x29;
 bool has_i2c_color_sensor = false;
 
-CobotBrain brain;
 unsigned long startMillis = 0;
 unsigned long lastStepMicros = 0;
 unsigned long lastColorReadMillis = 0;
 int cached_r = 255, cached_g = 255, cached_b = 255;
+
+void setupMotorsHardware() {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+    ledcAttachChannel(PWM_PIN_L_A, 5000, 8, CH_L_A);
+    ledcAttachChannel(PWM_PIN_L_B, 5000, 8, CH_L_B);
+    ledcAttachChannel(PWM_PIN_R_A, 5000, 8, CH_R_A);
+    ledcAttachChannel(PWM_PIN_R_B, 5000, 8, CH_R_B);
+#elif defined(ESP32)
+    ledcSetup(CH_L_A, 5000, 8);
+    ledcSetup(CH_L_B, 5000, 8);
+    ledcSetup(CH_R_A, 5000, 8);
+    ledcSetup(CH_R_B, 5000, 8);
+    ledcAttachPin(PWM_PIN_L_A, CH_L_A);
+    ledcAttachPin(PWM_PIN_L_B, CH_L_B);
+    ledcAttachPin(PWM_PIN_R_A, CH_R_A);
+    ledcAttachPin(PWM_PIN_R_B, CH_R_B);
+#endif
+}
+
+static inline void writeLEDC(int channel, int pwm) {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+    ledcWriteChannel(channel, pwm);
+#elif defined(ESP32)
+    ledcWrite(channel, pwm);
+#else
+    analogWrite(channel, pwm);
+#endif
+}
+
+static inline int applyN20Deadzone(int pwm) {
+    if (pwm == 0) return 0;
+    if (pwm > 0) return constrain(map(pwm, 1, 255, MIN_N20_PWM, 255), 0, 255);
+    return -constrain(map(-pwm, 1, 255, MIN_N20_PWM, 255), 0, 255);
+}
+
+void setMotorHardware(int pwm_l, int pwm_r) {
+    int out_l = applyN20Deadzone(pwm_l);
+    int out_r = applyN20Deadzone(pwm_r);
+
+    if (out_l >= 0) {
+        writeLEDC(CH_L_A, out_l);
+        writeLEDC(CH_L_B, 0);
+    } else {
+        writeLEDC(CH_L_A, 0);
+        writeLEDC(CH_L_B, -out_l);
+    }
+
+    if (out_r >= 0) {
+        writeLEDC(CH_R_A, out_r);
+        writeLEDC(CH_R_B, 0);
+    } else {
+        writeLEDC(CH_R_A, 0);
+        writeLEDC(CH_R_B, -out_r);
+    }
+}
 
 void initColorSensorHardware() {
     Wire.begin();
@@ -817,56 +901,44 @@ void updateColorSensorHardware(int &r_out, int &g_out, int &b_out) {
     r_out = cached_r; g_out = cached_g; b_out = cached_b;
 }
 
-static inline int applyN20Deadzone(int pwm) {
-    if (pwm == 0) return 0;
-    const int MIN_N20_PWM = 45;
-    if (pwm > 0) return constrain(map(pwm, 1, 255, MIN_N20_PWM, 255), 0, 255);
-    return -constrain(map(-pwm, 1, 255, MIN_N20_PWM, 255), 0, 255);
-}
-
-void setMotorHardware(int pwm_l, int pwm_r) {
-    int out_l = applyN20Deadzone(pwm_l);
-    int out_r = applyN20Deadzone(pwm_r);
-
-    digitalWrite(IN1, out_l >= 0 ? HIGH : LOW);
-    digitalWrite(IN2, out_l >= 0 ? LOW  : HIGH);
-    analogWrite(ENA, abs(out_l));
-
-    digitalWrite(IN3, out_r >= 0 ? HIGH : LOW);
-    digitalWrite(IN4, out_r >= 0 ? LOW  : HIGH);
-    analogWrite(ENB, abs(out_r));
-}
-
 void setup() {
-    pinMode(ENA, OUTPUT); pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
-    pinMode(ENB, OUTPUT); pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
-    setMotorHardware(0, 0);
+    Serial.begin(115200);
+
+    pinMode(IR_LED_ON, OUTPUT);
+    digitalWrite(IR_LED_ON, 1);
+
+    pinMode(W_LED_ON, OUTPUT);
+    digitalWrite(W_LED_ON, 1);
 
     for (int i = 0; i < 4; i++) {
         pinMode(PIN_IR[i], INPUT);
     }
 
+    setupMotorsHardware();
+    setMotorHardware(0, 0);
+
     initColorSensorHardware();
 
-    for (int sample = 0; sample < 40; sample++) {
-        int r0 = analogRead(PIN_IR[0]);
-        int r1 = analogRead(PIN_IR[1]);
-        int r2 = analogRead(PIN_IR[2]);
-        int r3 = analogRead(PIN_IR[3]);
+    long sum_outer = 0, sum_inner = 0;
+    for (int sample = 0; sample < 30; sample++) {
+        int r0 = analogRead(SENSOR_1_PIN);
+        int r1 = analogRead(SENSOR_2_PIN);
+        int r2 = analogRead(SENSOR_3_PIN);
+        int r3 = analogRead(SENSOR_4_PIN);
 
-        int outer_avg = (r0 + r3) / 2;
-        int inner_avg = (r1 + r2) / 2;
-
-        if (abs(inner_avg - outer_avg) > 120) {
-            ir_inverted = (inner_avg < outer_avg);
-            int white_val = ir_inverted ? (1023 - outer_avg) : outer_avg;
-            int black_val = ir_inverted ? (1023 - inner_avg) : inner_avg;
-            for (int i = 0; i < 4; i++) {
-                ir_min_cal[i] = constrain(white_val + 35, 80, 450);
-                ir_max_cal[i] = constrain(black_val - 35, 520, 960);
-            }
-        }
+        sum_outer += (r0 + r3) / 2;
+        sum_inner += (r1 + r2) / 2;
         delay(5);
+    }
+
+    int avg_white = (int)(sum_outer / 30);
+    int avg_black = (int)(sum_inner / 30);
+
+    if (avg_white > avg_black + 400) {
+        for (int i = 0; i < 4; i++) {
+            ir_white_cal[i] = avg_white - 150;
+            ir_black_cal[i] = avg_black + 150;
+        }
     }
 
     brain.reset();
@@ -882,25 +954,20 @@ void loop() {
 
     SensorData sData;
     sData.elapsed_sec = (millis() - startMillis) / 1000.0;
+    sData.battery_volt = 6.0f;
 
     for (int i = 0; i < 4; i++) {
         int raw = analogRead(PIN_IR[i]);
         sData.raw_ir[i] = raw;
-        int val = ir_inverted ? (1023 - raw) : raw;
 
-        if (val < ir_min_cal[i] && val > 30)  ir_min_cal[i] = (ir_min_cal[i] * 7 + val) / 8;
-        if (val > ir_max_cal[i] && val < 995) ir_max_cal[i] = (ir_max_cal[i] * 7 + val) / 8;
+        if (raw > ir_white_cal[i] && raw < 4050) ir_white_cal[i] = (ir_white_cal[i] * 7 + raw) / 8;
+        if (raw < ir_black_cal[i] && raw > 100)  ir_black_cal[i] = (ir_black_cal[i] * 7 + raw) / 8;
 
-        int span = (ir_max_cal[i] - ir_min_cal[i] > 180) ? (ir_max_cal[i] - ir_min_cal[i]) : 180;
-        float norm = (float)(val - ir_min_cal[i]) / (float)span;
+        int span = ir_white_cal[i] - ir_black_cal[i];
+        if (span < 500) span = 500;
+
+        float norm = (float)(ir_white_cal[i] - raw) / (float)span;
         sData.ir[i] = clampf(norm, 0.0f, 1.0f);
-    }
-
-    float measured_v = (analogRead(PIN_BAT) / 1023.0f) * 5.0f * 2.0f;
-    if (measured_v >= 4.2f && measured_v <= 7.5f) {
-        sData.battery_volt = measured_v;
-    } else {
-        sData.battery_volt = 6.0f;
     }
 
     updateColorSensorHardware(sData.r, sData.g, sData.b);
