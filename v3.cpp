@@ -116,25 +116,29 @@ public:
 
     double lost_line_time    = 0.0;
     double off_track_time    = 0.0;
+    double air_black_time    = 0.0;  // Thoi gian ca 4 mat deu bao den (nhac xe len tay)
     double straight_time     = 0.0;  // Thoi gian duy tri duong thang de kich hoat Turbo muot
 
-    // Trang thai xu ly nga tu & Bo nho dem lich su sai so (Chong nham cua & chong tu khoa khi vao xien)
-    int    cross_count          = 0;
-    int    cross_confirm_frames = 0;
-    int    wing_l_hold          = 0;
-    int    wing_r_hold          = 0;
-    float  wing_l_peak          = 0.0f;
-    float  wing_r_peak          = 0.0f;
-    bool   shortcut_taken       = false;
+    // Trang thai xu ly nga tu & Khoa an toan chong kich hoat tren tay
+    int    cross_count           = 0;
+    int    cross_confirm_frames  = 0;
+    int    wing_l_hold           = 0;
+    int    wing_r_hold           = 0;
+    float  wing_l_peak           = 0.0f;
+    float  wing_r_peak           = 0.0f;
+    bool   shortcut_taken        = false;
+
+    double clean_single_line_sec = 0.0;  // Thoi gian xe chay thuc te tren 1 vach don (tam den, 2 canh trang)
+    bool   cross_detector_armed  = false;// Chi = true sau khi xe da chay on dinh tren vach don >= 0.25s
 
     // Ring buffer luu |filtered_error| 8 chu ky truoc (16ms truoc khi cham mep nga tu)
     float  err_history[8];
-    int    err_hist_idx         = 0;
+    int    err_hist_idx          = 0;
 
-    float  calc_lr_bias         = 0.0f; // Tich luy phan tich huong trong 2s dung xe
-    int    calc_samples         = 0;
-    int    decided_turn_dir     = 1;    // Huong xoay sau khi tinh toan (+1: Phai, -1: Trai)
-    bool   turn_cleared_line    = false;// Co xac nhan da xoay thoat khoi vach cu
+    float  calc_lr_bias          = 0.0f; // Tich luy phan tich huong trong 2s dung xe
+    int    calc_samples          = 0;
+    int    decided_turn_dir      = 1;    // Huong xoay sau khi tinh toan (+1: Phai, -1: Trai)
+    bool   turn_cleared_line     = false;// Co xac nhan da xoay thoat khoi vach cu
 
     float  est_v_left        = 0.0f;
     float  est_v_right       = 0.0f;
@@ -151,50 +155,54 @@ public:
     CobotBrain() { reset(0.0); }
 
     void reset(double now_sec = 0.0) {
-        state                = STATE_NORMAL_RACE;
-        pos_error            = 0.0f;
-        prev_pos_error       = 0.0f;
-        filtered_error       = 0.0f;
-        filtered_deriv       = 0.0f;
-        outer_peak_memory    = 0.0f;
+        state                 = STATE_NORMAL_RACE;
+        pos_error             = 0.0f;
+        prev_pos_error        = 0.0f;
+        filtered_error        = 0.0f;
+        filtered_deriv        = 0.0f;
+        outer_peak_memory     = 0.0f;
 
-        last_valid_side      = 1;
-        center_locked        = true;
-        was_all_white        = false;
-        was_lifted           = false;
-        has_seen_line        = false;
+        last_valid_side       = 1;
+        center_locked         = true;
+        was_all_white         = false;
+        was_lifted            = false;
+        has_seen_line         = false;
 
-        lost_line_time       = 0.0;
-        off_track_time       = 0.0;
-        straight_time        = 0.0;
+        lost_line_time        = 0.0;
+        off_track_time        = 0.0;
+        air_black_time        = 0.0;
+        straight_time         = 0.0;
 
-        cross_count          = 0;
-        cross_confirm_frames = 0;
-        wing_l_hold          = 0;
-        wing_r_hold          = 0;
-        wing_l_peak          = 0.0f;
-        wing_r_peak          = 0.0f;
-        shortcut_taken       = false;
+        cross_count           = 0;
+        cross_confirm_frames  = 0;
+        wing_l_hold           = 0;
+        wing_r_hold           = 0;
+        wing_l_peak           = 0.0f;
+        wing_r_peak           = 0.0f;
+        shortcut_taken        = false;
+
+        clean_single_line_sec = 0.0;
+        cross_detector_armed  = false;
 
         for (int i = 0; i < 8; i++) err_history[i] = 0.0f;
-        err_hist_idx         = 0;
+        err_hist_idx          = 0;
 
-        calc_lr_bias         = 0.0f;
-        calc_samples         = 0;
-        decided_turn_dir     = (CROSS_TURN_DIRECTION != 0) ? CROSS_TURN_DIRECTION : 1;
-        turn_cleared_line    = false;
+        calc_lr_bias          = 0.0f;
+        calc_samples          = 0;
+        decided_turn_dir      = (CROSS_TURN_DIRECTION != 0) ? CROSS_TURN_DIRECTION : 1;
+        turn_cleared_line     = false;
 
-        est_v_left           = 0.0f;
-        est_v_right          = 0.0f;
-        total_dist_m         = 0.0;
-        total_yaw_rad        = 0.0;
-        cross_dist_m         = 0.0;
-        cross_yaw_rad        = 0.0;
-        max_yaw_excursion    = 0.0;
-        last_cross_time      = -10.0;
+        est_v_left            = 0.0f;
+        est_v_right           = 0.0f;
+        total_dist_m          = 0.0;
+        total_yaw_rad         = 0.0;
+        cross_dist_m          = 0.0;
+        cross_yaw_rad         = 0.0;
+        max_yaw_excursion     = 0.0;
+        last_cross_time       = -10.0;
 
-        state_enter_time     = now_sec;
-        run_start_time       = now_sec;
+        state_enter_time      = now_sec;
+        run_start_time        = now_sec;
     }
 
     void enterState(TrackState new_state, double now_sec) {
@@ -332,28 +340,43 @@ public:
         float min_ir = min4f(s.ir[0], s.ir[1], s.ir[2], s.ir[3]);
 
         bool all_white_out = (max_ir < 0.10f);
-        bool all_black_air = (min_ir > 0.88f);
+        bool all_black_air = (min_ir > 0.85f);
+
+        // Kiem tra nhac xe len tay (ca 4 mat deu den > 0.85f lien tuc > 0.25s)
+        // Neu dang o trong bat ky trang thai nao ma nhac xe len tay > 0.25s thi huy ngay va khoa was_lifted!
+        if (all_black_air) {
+            air_black_time += dt;
+            if (air_black_time > 0.25) {
+                was_lifted            = true;
+                state                 = STATE_NORMAL_RACE;
+                cross_detector_armed  = false;
+                clean_single_line_sec = 0.0;
+            }
+        } else {
+            air_black_time = 0.0;
+        }
 
         // 1. Bao ve an toan khi nhac xe khoi san hoac vang khoi san > 0.85s
-        // Luu y: Khong kich hoat was_lifted khi xe dang DUNG 2 GIAY TAI NGA TU (STATE_SHORTCUT_ALIGN)
-        // hoac dang XOAY TAI NGA TU (STATE_SHORTCUT_TURN).
         if ((all_white_out || all_black_air) &&
             state != STATE_SHORTCUT_ALIGN && state != STATE_SHORTCUT_TURN) {
             off_track_time += dt;
             if (off_track_time > 0.85) was_lifted = true;
         } else {
             if (was_lifted) {
-                // Khi dat xe xuong vach tro lai -> tu dong reset va chay tiep
-                if ((s.ir[1] > 0.35f || s.ir[2] > 0.35f) && min_ir < 0.45f) {
+                // Khi dat xe xuong vach don tro lai (giua den, 2 mat ngoai trang) -> reset va chay tiep
+                if ((s.ir[1] > 0.50f || s.ir[2] > 0.50f) && s.ir[0] < 0.30f && s.ir[3] < 0.30f) {
                     reset(s.elapsed_sec);
                     has_seen_line = true;
                 }
             } else {
-                if (max_ir >= 0.20f && min_ir < 0.75f) {
+                // Chi xac nhan has_seen_line khi thay vach don ro rang (tranh luc dang cam tren tay)
+                if ((s.ir[1] > 0.45f || s.ir[2] > 0.45f) && (s.ir[0] < 0.35f || s.ir[3] < 0.35f)) {
                     if (!has_seen_line) run_start_time = s.elapsed_sec;
                     has_seen_line = true;
                 }
-                off_track_time = 0.0;
+                if (!all_white_out && !all_black_air) {
+                    off_track_time = 0.0;
+                }
             }
         }
 
@@ -370,87 +393,103 @@ public:
         }
 
         // ====================================================================
-        // 2. NHAN DIEN NGA TU CHUAN XAC & DUNG XE TINH TOAN 2 GIAY ROI XOAY
+        // 2. NHAN DIEN NGA TU CHUAN XAC (CHONG KICH HOAT TREN TAY & TREN VACH DON)
+        //    & QUY TRINH: DUNG LAI -> TINH TOAN 2.0 GIAY -> XOAY
         // ====================================================================
         if (ENABLE_CROSS_SHORTCUT && has_seen_line && off_track_time < 0.05) {
-            double run_elapsed = s.elapsed_sec - run_start_time;
-
             if (state == STATE_NORMAL_RACE && !shortcut_taken && cross_count < SHORTCUT_CROSS_COUNT) {
-                // A. Cua so giu dinh 14ms (7 frames) cho 2 mat ngoai s0 va s3
-                // Giup bat dinh nga tu 100% ke ca khi xe lao vao nga tu bi lech goc 15-20 do!
-                if (s.ir[0] > 0.34f) {
-                    wing_l_hold = 7;
-                    if (s.ir[0] > wing_l_peak) wing_l_peak = s.ir[0];
-                } else if (wing_l_hold > 0) {
-                    // Neu mat ngoai da trang tinh (< 0.12f) thi xa nhanh de khong luu nhieu cua
-                    if (s.ir[0] < 0.12f) wing_l_hold = 0;
-                    else wing_l_hold--;
-                    if (wing_l_hold == 0) wing_l_peak = 0.0f;
+                // --- BUOC A: KHOA AN TOAN TRƯỚC KHI MỞ NHẬN DIỆN NGÃ TƯ (ARMING GATE) ---
+                // Xe bat buoc phai chay tren VACH DON THUC TE:
+                //   - Mat giua nam tren vach den (s1 > 0.55 hoac s2 > 0.55)
+                //   - CA 2 MAT NGOAI CUNG (s0 va s3) phai nhin thay NEN TRANG (< 0.25f)
+                //   - Duy tri tich luy du 0.25 giay (125 chu ky)
+                // -> Loai bo 100% loi cam xe tren tay dat xuong vach ma tu xoay nhu trong video!
+                bool on_clean_single_line = ((s.ir[1] > 0.55f || s.ir[2] > 0.55f) &&
+                                             s.ir[0] < 0.25f && s.ir[3] < 0.25f &&
+                                             fabsf(filtered_error) < 1.10f);
+                if (on_clean_single_line) {
+                    clean_single_line_sec += dt;
+                    if (clean_single_line_sec >= 0.25) {
+                        cross_detector_armed = true; // Da chay on dinh tren vach don -> Mo khoa bat nga tu!
+                    }
+                } else if (all_white_out || all_black_air) {
+                    clean_single_line_sec = 0.0;
+                    cross_detector_armed  = false;
                 }
 
-                if (s.ir[3] > 0.34f) {
-                    wing_r_hold = 7;
-                    if (s.ir[3] > wing_r_peak) wing_r_peak = s.ir[3];
-                } else if (wing_r_hold > 0) {
-                    if (s.ir[3] < 0.12f) wing_r_hold = 0;
-                    else wing_r_hold--;
-                    if (wing_r_hold == 0) wing_r_peak = 0.0f;
-                }
+                // --- BUOC B: NHAN DIEN NGA TU KHI DA DUOC MO KHOA (cross_detector_armed == true) ---
+                if (cross_detector_armed) {
+                    // Cua so giu dinh 5 chu ky (10ms) CHO VACH DEN DAM (> 0.60f) o 2 canh ngoai
+                    // Tren vach thang day ~2.5cm, ria vach chi lam s0/s3 len ~0.20..0.35f.
+                    // Chi khi gap vach ngang cua NGA TU thi ca s0 va s3 moi vot len DEN DAM (> 0.60f)!
+                    if (s.ir[0] > 0.60f) {
+                        wing_l_hold = 5;
+                        if (s.ir[0] > wing_l_peak) wing_l_peak = s.ir[0];
+                    } else if (wing_l_hold > 0) {
+                        if (s.ir[0] < 0.30f) wing_l_hold = 0;
+                        else wing_l_hold--;
+                        if (wing_l_hold == 0) wing_l_peak = 0.0f;
+                    }
 
-                // B. Kiem tra sai so 16ms TRUOC KHI CHAM NGA TU (lay tu ring buffer err_history)
-                // Tai sao phai lay 16ms truoc? Vi ngay khoanh khac 1 canh cham nga tu som hon 2ms,
-                // filtered_error hien tai se bi giat len. Lay 16ms truoc giup biet chinh xac xe dang
-                // di tren vach thang hay dang vang o khuc cua gat!
-                float pre_cross_err = err_history[err_hist_idx]; // Gia tri cach day 8 chu ky (16ms)
-                bool  approach_not_cornering = (pre_cross_err < 1.85f && lost_line_time == 0.0);
+                    if (s.ir[3] > 0.60f) {
+                        wing_r_hold = 5;
+                        if (s.ir[3] > wing_r_peak) wing_r_peak = s.ir[3];
+                    } else if (wing_r_hold > 0) {
+                        if (s.ir[3] < 0.30f) wing_r_hold = 0;
+                        else wing_r_hold--;
+                        if (wing_r_hold == 0) wing_r_peak = 0.0f;
+                    }
 
-                // C. Nguyen ly hinh hoc 4 mat:
-                // Khoang cach s0 den s3 la ~50mm, vach don chi rong ~20mm.
-                // Vach don KHONG BAO GIO lam ca s0, tam (s1/s2), va s3 cung den!
-                bool center_on_line   = (s.ir[1] > 0.32f || s.ir[2] > 0.32f) &&
-                                        ((s.ir[1] + s.ir[2]) > 0.48f);
-                bool both_wings_live  = (s.ir[0] > 0.26f && s.ir[3] > 0.26f) &&
-                                        (max2f(s.ir[0], s.ir[3]) > 0.38f);
-                bool both_wings_held  = (wing_l_hold > 0 && wing_r_hold > 0 &&
-                                         wing_l_peak > 0.36f && wing_r_peak > 0.36f);
-                float total_black_sum = s.ir[0] + s.ir[1] + s.ir[2] + s.ir[3];
-                float peak_black_sum  = wing_l_peak + s.ir[1] + s.ir[2] + wing_r_peak;
+                    // Kiem tra 16ms truoc khi cham nga tu xe dang chay thang (khong phai dang be cua U)
+                    float pre_cross_err          = err_history[err_hist_idx];
+                    bool  approach_not_cornering = (pre_cross_err < 1.30f && lost_line_time == 0.0);
 
-                bool is_cross_pattern = center_on_line && both_wings_live && both_wings_held &&
-                                        (total_black_sum >= 1.45f || peak_black_sum >= 1.70f) &&
-                                        approach_not_cornering;
+                    // Dieu kien 4 mat de len nga tu:
+                    // 1. 2 mat giua de vach den dam: (s1 + s2) > 1.10f va ca s1, s2 > 0.45f
+                    // 2. 2 mat ngoai cung de vach ngang den dam: live s0 > 0.50f & s3 > 0.50f, peak > 0.62f
+                    // 3. Tong do den 4 mat >= 2.50f
+                    bool center_solid_black = (s.ir[1] > 0.45f && s.ir[2] > 0.45f) &&
+                                              ((s.ir[1] + s.ir[2]) > 1.10f);
+                    bool wings_solid_black  = (s.ir[0] > 0.50f && s.ir[3] > 0.50f) &&
+                                              (wing_l_hold > 0 && wing_r_hold > 0) &&
+                                              (wing_l_peak > 0.62f && wing_r_peak > 0.62f);
+                    float total_4_black     = s.ir[0] + s.ir[1] + s.ir[2] + s.ir[3];
 
-                if (is_cross_pattern) {
-                    cross_confirm_frames++;
-                } else if (s.ir[0] < 0.20f || s.ir[3] < 0.20f) {
-                    cross_confirm_frames = 0;
-                }
+                    bool is_cross_pattern = center_solid_black && wings_solid_black &&
+                                            (total_4_black >= 2.50f) && approach_not_cornering;
 
-                // D. Cooldown chong nhan trung (Cho phep bat ngay tu 50ms dau tien sau khi dat xe!)
-                bool cooldown_ok = (last_cross_time < 0.0)
-                                   ? (run_elapsed > 0.05)
-                                   : ((s.elapsed_sec - last_cross_time) > 0.40);
+                    if (is_cross_pattern) {
+                        cross_confirm_frames++;
+                    } else if (s.ir[0] < 0.40f || s.ir[3] < 0.40f) {
+                        cross_confirm_frames = 0;
+                    }
 
-                if (cross_confirm_frames >= 2 && cooldown_ok) {
-                    cross_confirm_frames = 0;
-                    wing_l_hold          = 0;
-                    wing_r_hold          = 0;
-                    wing_l_peak          = 0.0f;
-                    wing_r_peak          = 0.0f;
-                    cross_count++;
-                    last_cross_time   = s.elapsed_sec;
-                    cross_dist_m      = total_dist_m;
-                    cross_yaw_rad     = total_yaw_rad;
-                    max_yaw_excursion = 0.0;
+                    bool cooldown_ok = (last_cross_time < 0.0) ||
+                                       ((s.elapsed_sec - last_cross_time) > 0.50);
 
-                    if (cross_count < SHORTCUT_CROSS_COUNT) {
-                        enterState(STATE_CROSS_LOCK, s.elapsed_sec);
-                    } else {
-                        // KICH HOAT DUNG XE NGAY LAP TUC & TINH TOAN 2.0 GIAY!
-                        calc_lr_bias      = (s.ir[3] - s.ir[0]);
-                        calc_samples      = 1;
-                        turn_cleared_line = false;
-                        enterState(STATE_SHORTCUT_ALIGN, s.elapsed_sec);
+                    if (cross_confirm_frames >= 2 && cooldown_ok) {
+                        cross_confirm_frames  = 0;
+                        wing_l_hold           = 0;
+                        wing_r_hold           = 0;
+                        wing_l_peak           = 0.0f;
+                        wing_r_peak           = 0.0f;
+                        cross_detector_armed  = false; // Khoa lai cho den khi xoay xong va chay tren vach moi
+                        clean_single_line_sec = 0.0;
+                        cross_count++;
+                        last_cross_time   = s.elapsed_sec;
+                        cross_dist_m      = total_dist_m;
+                        cross_yaw_rad     = total_yaw_rad;
+                        max_yaw_excursion = 0.0;
+
+                        if (cross_count < SHORTCUT_CROSS_COUNT) {
+                            enterState(STATE_CROSS_LOCK, s.elapsed_sec);
+                        } else {
+                            // DUNG XE NGAY TAI NGA TU & DEM DU 2.0 GIAY!
+                            calc_lr_bias      = (s.ir[3] - s.ir[0]);
+                            calc_samples      = 1;
+                            turn_cleared_line = false;
+                            enterState(STATE_SHORTCUT_ALIGN, s.elapsed_sec);
+                        }
                     }
                 }
             }
@@ -458,7 +497,7 @@ public:
             double state_dur = s.elapsed_sec - state_enter_time;
 
             if (state == STATE_CROSS_LOCK) {
-                bool cleared_wings = (state_dur > 0.035 && s.ir[0] < 0.20f && s.ir[3] < 0.20f);
+                bool cleared_wings = (state_dur > 0.035 && s.ir[0] < 0.25f && s.ir[3] < 0.25f);
                 if (cleared_wings || state_dur > 0.070) {
                     state = STATE_NORMAL_RACE;
                 }
@@ -467,12 +506,12 @@ public:
                 // GIAI DOAN 1: DUNG HAN XE TAI NGA TU & TINH TOAN TRONG 2.0 GIAY
                 // ============================================================
                 if (state_dur < CROSS_STOP_WAIT_SEC) {
-                    // Trong 55ms dau tien: Phanh nguoc (-180 PWM) de xe dung khing ngay tai nga tu
+                    // Trong 55ms dau: Phanh nguoc de xe dung dung tai nga tu
                     if (state_dur < 0.055) {
                         pwm_left  = -180;
                         pwm_right = -180;
                     } else {
-                        // Dung im tuyet doi (PWM = 0, 0) cho den khi du 2.0 giay
+                        // Dung yen tuyet doi (PWM = 0, 0) trong suot 2.0 giay
                         pwm_left  = 0;
                         pwm_right = 0;
                     }
@@ -498,7 +537,7 @@ public:
                     updateVirtualOdometry(pwm_left, pwm_right, dt);
                     return;
                 } else {
-                    // Het 2.0 giay dung xe -> Chuyen sang XOAY!
+                    // Da dung tren san du 2.0 giay -> Bat dau XOAY!
                     turn_cleared_line = false;
                     enterState(STATE_SHORTCUT_TURN, s.elapsed_sec);
                     state_dur = 0.0;
@@ -520,12 +559,12 @@ public:
                     return;
                 }
 
-                if ((s.ir[1] < 0.32f && s.ir[2] < 0.32f) || state_dur > 0.20) {
+                if ((s.ir[1] < 0.32f && s.ir[2] < 0.32f) || state_dur > 0.22) {
                     turn_cleared_line = true;
                 }
 
                 // Tiep tuc xoay den khi 2 mat giua bat duoc vach nhanh moi
-                bool caught_new_line = turn_cleared_line && (s.ir[1] > 0.45f || s.ir[2] > 0.45f);
+                bool caught_new_line = turn_cleared_line && (s.ir[1] > 0.50f || s.ir[2] > 0.50f);
                 if (caught_new_line || state_dur > 0.55) {
                     if (REPEAT_EVERY_CROSS) {
                         shortcut_taken = false;
@@ -534,13 +573,15 @@ public:
                         shortcut_taken = true;
                     }
 
-                    state           = STATE_NORMAL_RACE;
-                    last_cross_time = s.elapsed_sec; // Cap nhat moc thoi gian ket thuc xoay
-                    cross_dist_m    = total_dist_m;
-                    wing_l_hold     = 0;
-                    wing_r_hold     = 0;
-                    wing_l_peak     = 0.0f;
-                    wing_r_peak     = 0.0f;
+                    state                 = STATE_NORMAL_RACE;
+                    last_cross_time       = s.elapsed_sec;
+                    cross_dist_m          = total_dist_m;
+                    cross_detector_armed  = false; // Phai chay thang tren vach moi 0.25s moi mo khoa lai
+                    clean_single_line_sec = 0.0;
+                    wing_l_hold           = 0;
+                    wing_r_hold           = 0;
+                    wing_l_peak           = 0.0f;
+                    wing_r_peak           = 0.0f;
                     for (int i = 0; i < 8; i++) err_history[i] = 0.0f;
 
                     float init_err = computeLineError(s.ir);
@@ -575,8 +616,8 @@ public:
         // Loc sieu nhe cho P (alpha = 0.78 -> do tre < 0.5ms, phan xa tuc thi)
         filtered_error = 0.22f * filtered_error + 0.78f * pos_error;
 
-        // Luu |filtered_error| vao ring buffer 8 chu ky (16ms) khi 2 canh ngoai khong cung den
-        if (!(s.ir[0] > 0.26f && s.ir[3] > 0.26f)) {
+        // Luu |filtered_error| vao ring buffer 8 chu ky (16ms) khi 2 canh ngoai dang o nen trang
+        if (s.ir[0] < 0.30f && s.ir[3] < 0.30f) {
             err_history[err_hist_idx] = fabsf(filtered_error);
             err_hist_idx = (err_hist_idx + 1) & 0x07;
         }
