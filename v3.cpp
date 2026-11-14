@@ -6,7 +6,12 @@
 // ============================================================================
 #define ENABLE_SERIAL_TELEMETRY 0 // 0 = Tat Serial khi chay thi that | 1 = Bat log debug
 #define ENABLE_CROSS_SHORTCUT   1 // 1 = Kich hoat xu ly nga tu (Qua nga 4 thu 1, Re phai nga 4 thu 2)
-#define SHORTCUT_CROSS_COUNT    2 // Nga tu thu 1: Di thang qua | Nga tu thu 2: Re phai dinh cao
+#define SHORTCUT_CROSS_COUNT    2 // Nga tu thu 1: Di thang qua | Nga tu thu 2: Re phai 90 do
+
+// --- THONG SO CANH GOC RE PHAI 90 DO TAI NGA TU THU 2 ---
+const float ALIGN_FORWARD_SEC    = 0.055f; // Thoi gian tien them de dat truc banh xe dung tam nga tu (0.045..0.070s)
+const float TURN_BLIND_MIN_SEC   = 0.220f; // Thoi gian xoay mu toi thieu de vuot qua goc 65-75 do, bo qua vach thang cu (tang neu muon goc lon hon)
+const float TURN_MAX_TIMEOUT_SEC = 0.650f; // Thoi gian xoay toi da de bat vach nhanh phai 90 do
 
 // --- CAU HINH TOC DO (DAT TOC DO CAO NHUNG VAO CUA CUC DINH) ---
 // Luu y: Voi dong co N20 toc do cao, STRAIGHT_PWM = 245..255 tren duong thang,
@@ -115,7 +120,7 @@ public:
     double off_track_time    = 0.0;
     double straight_time     = 0.0;  // Thoi gian duy tri duong thang de kich hoat Turbo muot
 
-    // Trang thai xu ly nga tu & Re phai 3 giai doan chinh xac cao
+    // Trang thai xu ly nga tu & Re phai 90 do 3 giai doan
     int    cross_count          = 0;
     int    cross_confirm_frames = 0;
     int    cross_clear_frames   = 0;    // Dem so frame 2 canh ngoai da thoat han vach ngang
@@ -123,8 +128,8 @@ public:
     int    wing_r_hold          = 0;
     bool   cross_rearmed        = true; // Khoa chong dem trung nga tu 1 thanh nga tu 2
     bool   shortcut_taken       = false;
-    bool   turn_cleared_center  = false;// Co bao mui xe da vuot qua vach thang cu khi dang xoay
-    bool   turn_pre_seen        = false;// Co bao mat phai (s3) da cham mep vach nhanh phai moi
+    bool   turn_cleared_center  = false;// Co bao mui xe da quet qua han vach thang cu
+    bool   turn_pre_seen        = false;// Co bao mat phai (s3) da bat dau thay vach nhanh phai 90 do
 
     float  est_v_left        = 0.0f;
     float  est_v_right       = 0.0f;
@@ -143,7 +148,7 @@ public:
     void reset(double now_sec = 0.0) {
         state                = STATE_NORMAL_RACE;
         pos_error            = 0.0f;
-        prev_pos_error     = 0.0f;
+        prev_pos_error       = 0.0f;
         filtered_error       = 0.0f;
         filtered_deriv       = 0.0f;
         outer_peak_memory    = 0.0f;
@@ -151,7 +156,7 @@ public:
         last_valid_side      = 1;
         center_locked        = true;
         was_all_white        = false;
-        was_lifted           = false;
+        was_lifted         = false;
         has_seen_line        = false;
 
         lost_line_time       = 0.0;
@@ -351,31 +356,30 @@ public:
         }
 
         // ====================================================================
-        // 2. THUAT TOAN XU LY NGA TU & RE PHAI 3 GIAI DOAN CHUAN TUNG MILI-GIAY
-        //    - Nga tu 1: Khoa 2 canh ngoai, lao thang qua muot ma
-        //    - Nga tu 2: Canh tam truc banh xe -> Xoay nhanh -> Phanh don vach
+        // 2. THUAT TOAN XU LY NGA TU & RE PHAI 90 DO DU GOC 100%
+        //    - Nga tu 1: Khoa 2 canh ngoai, lao thang qua
+        //    - Nga tu 2: Tien truc banh vao tam -> Xoay mu vuot 70 do -> Bat vach 90 do
         // ====================================================================
         if (ENABLE_CROSS_SHORTCUT && has_seen_line && off_track_time < 0.05) {
             double dist_since_cross = total_dist_m - cross_dist_m;
             double run_elapsed      = s.elapsed_sec - run_start_time;
 
             // 2.1. Co che Rearm Hysteresis: Dam bao xe da thoat han nga tu 1
-            //      va di tren vach sach it nhat 20 frames (40ms) truoc khi san sang bat nga tu 2
+            //      va di tren vach sach it nhat 16 frames (32ms) truoc khi san sang bat nga tu 2
             if (state == STATE_NORMAL_RACE && !cross_rearmed) {
                 if (s.ir[0] < 0.22f && s.ir[3] < 0.22f && (s.ir[1] > 0.30f || s.ir[2] > 0.30f)) {
                     cross_clear_frames++;
                 } else if (s.ir[0] > 0.40f || s.ir[3] > 0.40f) {
                     cross_clear_frames = 0;
                 }
-                if (cross_clear_frames >= 20 &&
-                    (s.elapsed_sec - last_cross_time) > 0.16 &&
-                    dist_since_cross > 0.09) {
+                if (cross_clear_frames >= 16 &&
+                    (s.elapsed_sec - last_cross_time) > 0.14 &&
+                    dist_since_cross > 0.08) {
                     cross_rearmed = true;
                 }
             }
 
             // 2.2. Phat hien nga tu voi bo nho Skew-Window 6 frames (12ms)
-            //      Chong bo sot ngay ca khi xe lao vao nga tu hơi cheo o toc do 245 PWM
             if (state == STATE_NORMAL_RACE && !shortcut_taken && cross_count < SHORTCUT_CROSS_COUNT) {
                 if (s.ir[0] > 0.46f) wing_l_hold = 6;
                 else if (wing_l_hold > 0) wing_l_hold--;
@@ -394,7 +398,6 @@ public:
                     cross_confirm_frames = 0;
                 }
 
-                // Dieu kien an toan chong nhieu luc moi xuat phat
                 bool valid_trigger = (cross_count == 0)
                                      ? (run_elapsed > 0.15 && total_dist_m > 0.08)
                                      : cross_rearmed;
@@ -416,7 +419,7 @@ public:
                         // NGA TU THU 1: Khoa canh ngoai, di thang qua
                         enterState(STATE_CROSS_LOCK, s.elapsed_sec);
                     } else {
-                        // NGA TU THU 2: Bat dau quy trinh Re Phai 3 giai doan
+                        // NGA TU THU 2: Bat dau quy trinh Re Phai 90 do
                         turn_cleared_center = false;
                         turn_pre_seen       = false;
                         enterState(STATE_SHORTCUT_ALIGN, s.elapsed_sec);
@@ -426,7 +429,7 @@ public:
 
             double state_dur = s.elapsed_sec - state_enter_time;
 
-            // 2.3. Xu ly NGA TU THU 1 (STATE_CROSS_LOCK): Lao thang qua khong lac dau
+            // 2.3. Xu ly NGA TU THU 1 (STATE_CROSS_LOCK): Lao thang qua
             if (state == STATE_CROSS_LOCK) {
                 bool cleared_wings = (state_dur > 0.032 && s.ir[0] < 0.20f && s.ir[3] < 0.20f);
                 if (cleared_wings || state_dur > 0.080) {
@@ -434,56 +437,67 @@ public:
                 }
             }
             // 2.4. Xu ly NGA TU THU 2 - GIAI DOAN 1 (STATE_SHORTCUT_ALIGN):
-            //      Ha toc do kiem soat va dua truc banh xe tien len dung tam nga tu.
-            //      Ngay khoanh khac 2 mat ngoai (s0, s3) vua luot qua mep sau cua vach ngang
-            //      (hoac dat 38ms) -> Kich hoat xoay phai NGAY LAP TUC!
+            //      Chay thang them ALIGN_FORWARD_SEC (55ms) de dua TRUC BANH XE tien len
+            //      dung tam giao lo truoc khi xoay (tranh xoay som lam mat cam bien quet cheo 30 do)
             else if (state == STATE_SHORTCUT_ALIGN) {
-                bool passed_cross_tape = (state_dur >= 0.016 && s.ir[0] < 0.24f && s.ir[3] < 0.24f);
-                if (!passed_cross_tape && state_dur < 0.038) {
-                    // Giu mui xe bam tam vach thang trong khi dua truc banh vao tam giao lo
-                    float align_err  = (s.ir[2] - s.ir[1]) * 35.0f;
-                    pwm_left         = (int)clampf(155.0f + align_err, 110.0f, 195.0f);
-                    pwm_right        = (int)clampf(155.0f - align_err, 110.0f, 195.0f);
+                if (state_dur < ALIGN_FORWARD_SEC) {
+                    float align_err = (s.ir[2] - s.ir[1]) * 30.0f;
+                    pwm_left        = (int)clampf(185.0f + align_err, 140.0f, 215.0f);
+                    pwm_right       = (int)clampf(185.0f - align_err, 140.0f, 215.0f);
                     updateVirtualOdometry(pwm_left, pwm_right, dt);
                     return;
                 } else {
+                    turn_cleared_center = false;
+                    turn_pre_seen       = false;
                     enterState(STATE_SHORTCUT_TURN, s.elapsed_sec);
                     state_dur = 0.0;
                 }
             }
 
             // 2.5. Xu ly NGA TU THU 2 - GIAI DOAN 2 & 3 (STATE_SHORTCUT_TURN):
-            //      Xoay phai quanh tam + Phanh don vach khi mat s3 bat duoc nhanh phai
+            //      Ep xoay mu toi thieu TURN_BLIND_MIN_SEC (220ms) voi luc vi sai cuc manh (245 / -215)
+            //      de xe quay vuot qua 70 do, loai bo hoan toan hien tuong dung som o 30 do!
             if (state == STATE_SHORTCUT_TURN) {
-                last_valid_side = 1; // Khoa huong phai
+                last_valid_side = 1;     // Khoa cung huong phai
+                center_locked   = false; // Ep che do Pivot Recovery tiep tuc xoay neu het timeout ma chua cham vach
 
-                // Kiem tra xem mui xe (s1, s2) da thoat khoi vach thang cu chua
-                if (state_dur > 0.055 && s.ir[1] < 0.24f && s.ir[2] < 0.24f) {
-                    turn_cleared_center = true;
-                }
-                if (state_dur > 0.105) {
-                    turn_cleared_center = true;
-                }
-
-                // GIAI DOAN 2A: Be mui cuc nhanh thoat khoi vach thang trung tam
-                if (!turn_cleared_center) {
-                    pwm_left  =  215;
-                    pwm_right = -155;
+                // GIAI DOAN 2A: Xoay mu cuong buc (Blind Hard Pivot)
+                // Trong suot TURN_BLIND_MIN_SEC (220ms dau), KHONG cho phep bat ky mat cam bien nao
+                // ngat lenh xoay (vi luc nay mat cam bien dang quet ngang qua vach thang cu o goc 0..45 do)
+                if (state_dur < TURN_BLIND_MIN_SEC) {
+                    pwm_left  =  245;
+                    pwm_right = -215;
                     updateVirtualOdometry(pwm_left, pwm_right, dt);
                     return;
                 }
 
-                // Phat hien som: Mat ngoai cung ben phai (s3) vua cham vao vach nhanh phai moi!
-                if (s.ir[3] > 0.38f) {
+                // Sau khi da vuot qua TURN_BLIND_MIN_SEC (goc quay da > 65-70 do),
+                // kiem tra cac mat giua da thoat khoi vach cu chua
+                if (s.ir[1] < 0.22f && s.ir[2] < 0.22f) {
+                    turn_cleared_center = true;
+                }
+                if (state_dur > TURN_BLIND_MIN_SEC + 0.050f) {
+                    turn_cleared_center = true;
+                }
+
+                if (!turn_cleared_center) {
+                    pwm_left  =  240;
+                    pwm_right = -205;
+                    updateVirtualOdometry(pwm_left, pwm_right, dt);
+                    return;
+                }
+
+                // GIAI DOAN 2B: Don vach nhanh phai 90 do tu mat phai (s3 -> s2)
+                if (s.ir[3] > 0.40f) {
                     turn_pre_seen = true;
                 }
 
-                // Dieu kien ket thuc xoay: Vach moi da di vao mat giua (s2 hoac s1)
-                bool center_caught_new_line = (s.ir[2] > 0.38f || s.ir[1] > 0.36f ||
-                                              (turn_pre_seen && s.ir[2] > 0.26f));
+                // Chi ket thuc xoay khi vach nhanh phai 90 do da di vao mat trung tam s2 (hoac s1 sau khi qua s3)
+                bool center_caught_new_line = (s.ir[2] > 0.42f ||
+                                              (turn_pre_seen && s.ir[1] > 0.40f));
 
-                if (center_caught_new_line || state_dur > 0.34) {
-                    // GIAI DOAN 3: Ban giao muot ve PD, triet tieu xung dao ham de khong vang duoi
+                if (center_caught_new_line || state_dur > TURN_MAX_TIMEOUT_SEC) {
+                    // GIAI DOAN 3: Ban giao ve PD khi da nam tren vach 90 do
                     shortcut_taken  = true;
                     state           = STATE_NORMAL_RACE;
                     float init_err  = computeLineError(s.ir);
@@ -494,16 +508,16 @@ public:
                     straight_time   = 0.0;
                     last_valid_side = 1;
                 } else if (turn_pre_seen) {
-                    // GIAI DOAN 2B (PHANH DON VACH): Mat s3 da thay vach nhanh phai ->
-                    // Ha ngay toc do xoay de triet tieu quan tinh, don vach truot em vao s2!
-                    pwm_left  =  140;
-                    pwm_right =  -40;
+                    // Mat s3 da cham mep vach 90 do -> giu luc xoay du khoe (205 / -150)
+                    // de keo vach vao han mat giua s2 ma khong bi dung khuc giua chung!
+                    pwm_left  =  205;
+                    pwm_right = -150;
                     updateVirtualOdometry(pwm_left, pwm_right, dt);
                     return;
                 } else {
-                    // Dang quet qua khoang trang de tim nhanh phai
-                    pwm_left  =  195;
-                    pwm_right = -130;
+                    // Tiep tuc xoay manh quet tim vach 90 do
+                    pwm_left  =  230;
+                    pwm_right = -190;
                     updateVirtualOdometry(pwm_left, pwm_right, dt);
                     return;
                 }
