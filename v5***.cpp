@@ -1,37 +1,37 @@
 #include <Arduino.h>
 #include <math.h>
+#if defined(ESP32)
+#include <WiFi.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
+#endif
 
 // ============================================================================
 // 1. CAU HINH CHIEN THUAT & THONG SO DUONG DUA (CHINH NHANH TAI DAY)
 // ============================================================================
 #define ENABLE_SERIAL_TELEMETRY 0 // 0 = Tat Serial khi chay thi that | 1 = Bat log debug
-#define ENABLE_CROSS_SHORTCUT   0 // 0 = Bam line 100% (Chuan thi dau) | 1 = Re tat nga tu
-#define SHORTCUT_CROSS_COUNT    3 // So lan qua nga tu truoc khi re tat (neu bat = 1)
+#define ENABLE_CROSS_SHORTCUT   0 // 0 = Di thang qua moi nga tu (Chuan) | 1 = Re tat Vong tron 2
+#define SHORTCUT_CROSS_COUNT    3 // Nga tu thu 3 (Vong tron 2) se re tat (neu bat = 1)
 
-// Thoi gian cho an toan sau khi bat cong tac nguon (3000ms = 3 giay)
-// Giup ban dat xe chinh giua line, rut tay ra va doi ap pin on dinh hoan toan!
-#define STARTUP_SAFE_DELAY_MS   3000UL
+// --- CAU HINH TOC DO: DUONG THANG NHANH, VAO CUA GIAM TOC SOM BAM DUONG ---
+const float STRAIGHT_MAX_PWM   = 248.0f; // Toc do toi da tren duong thang
+const float NOMINAL_BASE_PWM   = 212.0f; // Toc do nen on dinh
+const float CORNER_MIN_PWM     = 108.0f; // Ha toc do nen du thap khi vao cua de lop xe khong bao gio truot vang!
+const float MAX_PWM_OUT        = 255.0f; // Tran PWM phan cung
+const float MAX_REVERSE_PWM    = -150.0f;// Luc phanh/dao chieu banh trong khi cua gat
 
-// --- CAU HINH TOC DO (TOI UU CHO CHAY PIN - CHONG SUT AP & BAM CUA CUC KHIT) ---
-const float STRAIGHT_MAX_PWM   = 232.0f; // Toc do toi da tren duong thang (220..240 an toan cho pin)
-const float NOMINAL_BASE_PWM   = 205.0f; // Toc do nen khi chay on dinh (195..220)
-const float CORNER_MIN_PWM     = 100.0f; // Toc do nen toi thieu o cua gat 90 do / cua U (90..120)
-const float MAX_PWM_OUT        = 238.0f; // Tran PWM de tranh bao hoa cuon day N20 gay sut ap pin
-const float MAX_REVERSE_PWM    = -125.0f;// Luc phanh/dao chieu banh trong vua du bam cua, khong xoay 360
+// --- THONG SO BO DIEU KHIEN PD LIEN TUC SIEU MUOT (500Hz, dt = 0.002s) ---
+const float KP_BASE            = 48.0f;  // He so P tuyen tinh giu tam muot ma
+const float KP_NONLINEAR       = 19.0f;  // He so P bac 2 tang luc om cua: Kp2 * e * |e|
+const float KD_BASE            = 1.80f;  // He so D lien tuc (khong nhay bac gay giat trong cua!)
+const float KD_CORNER_BOOST    = 0.45f;  // Tang nhe D khi o mep ngoai de chong vang
 
-// --- THONG SO BO DIEU KHIEN PD PHI TUYEN 500Hz (dt = 0.002s) ---
-// Sai so e nam trong dai [-4.20 .. +4.20]:
-const float KP_BASE            = 50.0f;  // He so P tuyen tinh giu tam cuc khit (chinh 44..58)
-const float KP_NONLINEAR       = 17.5f;  // He so P bac 2 tang luc be cua: Kp2 * e * |e| (chinh 14..22)
-const float KD_BASE            = 2.10f;  // He so D giam chan duong thang (chinh 1.6..2.8)
-const float KD_CORNER_BOOST    = 0.75f;  // Tang cuong D khi vao cua de chong vang duoi / chong xoay
-
-// --- THONG SO GIAM TOC THICH UNG THEO DO CONG & DAO HAM ---
-const float CURVE_SLOWDOWN_KE  = 35.0f;  // He so ha toc do nen theo sai so |e|
-const float CURVE_SLOWDOWN_KD  = 1.20f;  // He so phanh som ngay khi vach vua dich chuyen nhanh
+// --- THONG SO PHANH SOM KHI VAO CUA (CHONG VANG LINE 100%) ---
+const float CURVE_SLOWDOWN_KE  = 36.0f;  // Phanh som ngay khi vach bat dau lech tam (|e| > 0.15)
+const float CURVE_SLOWDOWN_KD  = 1.25f;  // Phanh du doan ngay khoanh khac vach dich chuyen nhanh vao cua
 
 // ============================================================================
-// 2. CAU HINH CHAN PHAN CUNG ESP32 & DONG CO N20 (DA BO W_LED_ON)
+// 2. CAU HINH CHAN PHAN CUNG ESP32 & DONG CO N20 (GIU NGUYEN BAN GOC CUA BAN)
 // ============================================================================
 #define PWM_PIN_L_A 2
 #define PWM_PIN_L_B 10
@@ -48,12 +48,12 @@ const float CURVE_SLOWDOWN_KD  = 1.20f;  // He so phanh som ngay khi vach vua di
 #define SENSOR_3_PIN 1
 #define SENSOR_4_PIN 0
 
-// W_LED_ON da duoc go bo khoi phan cung, chi giu IR_LED_ON cho mat doc line
+#define W_LED_ON  20
 #define IR_LED_ON 21
 
 const int PIN_IR[4]          = {SENSOR_1_PIN, SENSOR_2_PIN, SENSOR_3_PIN, SENSOR_4_PIN};
-const int MIN_N20_PWM        = 34;     // Nguong bu ma sat tinh cua hop so N20
-const float RIGHT_MOTOR_TRIM = 1.00f;  // Chinh 0.96..1.04 neu 2 banh khong deu
+const int MIN_N20_PWM        = 34;
+const float RIGHT_MOTOR_TRIM = 1.00f;
 
 const bool INVERT_LEFT_MOTOR  = false;
 const bool INVERT_RIGHT_MOTOR = false;
@@ -78,132 +78,43 @@ static inline float lerpf(float a, float b, float t) {
 }
 
 struct SensorData {
-    float ir[4];      // Tin hieu da chuan hoa vi sai [0.0 = Nen trang, 1.0 = Vach den]
-    int raw_ir[4];    // Gia tri ADC 12-bit [0 .. 4095]
-    int contrast_span;// Do tuong phan tuc thoi giua mat den nhat va trang nhat
+    float ir[4];      // [0.0 = Trang tinh, 1.0 = Den tuyet doi]
+    int raw_ir[4];    // [0 .. 4095]
     double elapsed_sec;
 };
 
 enum TrackState {
-    STATE_WAIT_LINE = 0,     // Cho dat xe len vach den hoac sau khi nhac xe
-    STATE_SOFT_LOCK,         // Moi dat xe len vach: khoa xoay gat, chi bam muot
-    STATE_NORMAL_RACE,       // Chay dua toc do cao tren vach
-    STATE_ARC_RECOVERY,      // Vua khuat vach o cua gat: quet cung ngan (< 250ms) de bat lai vach
-    STATE_SAFE_HALT,         // Vang khoi ban dua hoac nhac xe: ngat dong co tuyet doi (chong xoay 360)
-    STATE_CROSS_LOCK,
+    STATE_NORMAL_RACE = 0,
     STATE_SHORTCUT_ALIGN,
     STATE_SHORTCUT_TURN
 };
 
 // ============================================================================
-// 4. BO CHUAN HOA CAM BIEN VI SAI KHONG GIAN (THAY THE AUTO-CALIB CU)
-// ============================================================================
-// Nguyen ly:
-// - Thay vi phu thuoc vao nguong ADC tuyet doi (rat de sai khi pin sut ap),
-//   ta ket hop:
-//     (1) Bo nho Nen Trang Co So (base_white[4]) duoc loc chong nhieu cuc vung,
-//     (2) So sanh Vi Sai Không Gian giua 4 mat trong cung 1 khung hinh (instant_min)
-//         de triet tieu 100% nhieu sut ap nguon pin!
-// ============================================================================
-struct SmartSensorNormalizer {
-    float base_white[4];
-    float ref_span;
-
-    void initFromStartupSamples(const int startup_min[4], const int startup_max[4]) {
-        int g_min = startup_min[0];
-        int g_max = startup_max[0];
-        for (int i = 1; i < 4; i++) {
-            if (startup_min[i] < g_min) g_min = startup_min[i];
-            if (startup_max[i] > g_max) g_max = startup_max[i];
-        }
-
-        // Neu luc bat nguon xe dat tren san (g_min hop le < 1600)
-        if (g_min > 1600) g_min = 350;
-
-        for (int i = 0; i < 4; i++) {
-            // Neu mat cam bien do dang nam tren nen trang luc khoi dong, lay chinh no
-            // de bu sai lech giua cac mat LED. Neu mat do dang de len vach den, lay g_min!
-            if (startup_min[i] < g_min + 220) {
-                base_white[i] = (float)startup_min[i];
-            } else {
-                base_white[i] = (float)g_min;
-            }
-        }
-
-        int span = g_max - g_min;
-        if (span >= 550 && g_max < 3850) {
-            ref_span = (float)span * 0.85f;
-        } else {
-            ref_span = 1150.0f; // Bien do mac dinh an toan cho cam bien IR 12-bit
-        }
-        ref_span = clampf(ref_span, 550.0f, 2200.0f);
-    }
-
-    void processFrame(SensorData& s) {
-        int f_min = s.raw_ir[0];
-        int f_max = s.raw_ir[0];
-        for (int i = 1; i < 4; i++) {
-            if (s.raw_ir[i] < f_min) f_min = s.raw_ir[i];
-            if (s.raw_ir[i] > f_max) f_max = s.raw_ir[i];
-        }
-        s.contrast_span = f_max - f_min;
-
-        // Kiem tra xe co dang nam tren mat san hop le khong (tranh cap nhat khi nhac xe len khong trung)
-        bool on_floor_with_line = (f_min < 1650) && (f_max < 3920) && (s.contrast_span > 420);
-
-        if (on_floor_with_line) {
-            // Cap nhat do tuong phan tham chieu (EMA cuc cham, khong bao gio bi troi dot ngot)
-            float target_span = clampf((float)s.contrast_span * 0.86f, 520.0f, 2300.0f);
-            ref_span = 0.992f * ref_span + 0.008f * target_span;
-
-            // Cap nhat nen trang co so chi cho nhung mat dang thuc su nam tren nen trang
-            for (int i = 0; i < 4; i++) {
-                if (s.raw_ir[i] < f_min + 160 && s.raw_ir[i] > 30) {
-                    base_white[i] = 0.985f * base_white[i] + 0.015f * (float)s.raw_ir[i];
-                }
-            }
-        }
-
-        // Tinh gia tri chuan hoa [0.0 .. 1.0] ket hop Nen Co So va Vi Sai Tuc Thoi:
-        // Khi pin sut ap lam ca 4 mat cung tang/giam ADC, f_min cung dịch chuyen theo,
-        // giup dynamic_white[i] tu dong bam theo dien ap pin tuc thoi!
-        for (int i = 0; i < 4; i++) {
-            float dynamic_white = base_white[i];
-            if (f_min < 1650) {
-                // Neu f_min cao hon base_white do ap pin giam, nang nen trang len theo f_min
-                float common_mode_floor = (float)f_min + (base_white[i] - min4f(base_white[0], base_white[1], base_white[2], base_white[3]));
-                dynamic_white = 0.65f * base_white[i] + 0.35f * common_mode_floor;
-            }
-
-            float norm = ((float)s.raw_ir[i] - dynamic_white) / ref_span;
-            s.ir[i] = clampf(norm, 0.0f, 1.0f);
-        }
-    }
-};
-
-// ============================================================================
-// 5. BO DIEU KHIEN TRUNG TAM CHONG XOAY 360 DO (COMPETITION BRAIN 500Hz)
+// 4. BO DIEU KHIEN TRUNG TAM (SMOOTH CORNERING & SAFE INTERSECTION 500Hz)
 // ============================================================================
 class CobotBrain {
 public:
-    TrackState state = STATE_WAIT_LINE;
+    TrackState state = STATE_NORMAL_RACE;
 
-    float pos_error         = 0.0f;
-    float prev_pos_error    = 0.0f;
-    float filtered_error    = 0.0f;
-    float filtered_deriv    = 0.0f;
-    float outer_peak_memory = 0.0f;
+    float pos_error          = 0.0f;
+    float prev_pos_error     = 0.0f;
+    float filtered_error     = 0.0f;
+    float filtered_deriv     = 0.0f;
+    float outer_peak_memory  = 0.0f;
 
-    int   last_valid_side   = 0;     // 0: Chua xac dinh (Cam xoay!), -1: Trai, +1: Phai
-    bool  center_locked     = true;
-    bool  was_in_recovery   = false;
+    int   last_valid_side    = 1;
+    bool  center_locked      = true;
+    bool  was_all_white      = false;
+    bool  was_lifted         = false;
+    bool  has_seen_line      = false;
+    bool  in_cross_zone      = false; // Co bao dang di qua giao lo nga tu
 
-    double state_time       = 0.0;   // Thoi gian o trong state hien tai
-    double straight_time    = 0.0;   // Thoi gian duy tri duong thang
-    double soft_start_timer = 0.0;   // Tang toc em khi moi bat dau chay
-    double catch_brake_timer= 0.0;   // Thoi gian dap phanh chong vang khi vua bat lai vach
+    double lost_line_time    = 0.0;
+    double off_track_time    = 0.0;
+    double straight_time     = 0.0;
+    double active_run_time   = 0.0;
+    double cross_zone_timer  = 0.0;
 
-    // Xu ly Nga tu & Odometry ao
     int    cross_count          = 0;
     int    cross_confirm_frames = 0;
     int    wing_l_hold          = 0;
@@ -218,26 +129,32 @@ public:
     double cross_yaw_rad     = 0.0;
     double max_yaw_excursion = 0.0;
     double last_cross_time   = -10.0;
+
+    double state_enter_time  = 0.0;
     double run_start_time    = 0.0;
 
     CobotBrain() { reset(0.0); }
 
     void reset(double now_sec = 0.0) {
-        state               = STATE_WAIT_LINE;
-        pos_error           = 0.0f;
-        prev_pos_error      = 0.0f;
-        filtered_error      = 0.0f;
-        filtered_deriv      = 0.0f;
-        outer_peak_memory   = 0.0f;
+        state                = STATE_NORMAL_RACE;
+        pos_error            = 0.0f;
+        prev_pos_error       = 0.0f;
+        filtered_error       = 0.0f;
+        filtered_deriv       = 0.0f;
+        outer_peak_memory    = 0.0f;
 
-        last_valid_side     = 0; // QUAN TRONG: Khoi tao = 0 de khong bao gio tu xoay khi chua thay vach!
-        center_locked       = true;
-        was_in_recovery     = false;
+        last_valid_side      = 1;
+        center_locked        = true;
+        was_all_white        = false;
+        was_lifted           = false;
+        has_seen_line        = false;
+        in_cross_zone        = false;
 
-        state_time          = 0.0;
-        straight_time       = 0.0;
-        soft_start_timer    = 0.0;
-        catch_brake_timer   = 0.0;
+        lost_line_time       = 0.0;
+        off_track_time       = 0.0;
+        straight_time        = 0.0;
+        active_run_time      = 0.0;
+        cross_zone_timer     = 0.0;
 
         cross_count          = 0;
         cross_confirm_frames = 0;
@@ -253,14 +170,14 @@ public:
         cross_yaw_rad        = 0.0;
         max_yaw_excursion    = 0.0;
         last_cross_time      = -10.0;
+
+        state_enter_time     = now_sec;
         run_start_time       = now_sec;
     }
 
-    void changeState(TrackState new_state) {
-        if (state != new_state) {
-            state = new_state;
-            state_time = 0.0;
-        }
+    void enterState(TrackState new_state, double now_sec) {
+        state = new_state;
+        state_enter_time = now_sec;
     }
 
     void updateVirtualOdometry(int pwm_l, int pwm_r, double dt) {
@@ -286,230 +203,155 @@ public:
     }
 
     // ========================================================================
-    // NOI SUY VI TRI VACH LIEN TUC [-4.20 .. +4.20]
-    // Toa do 4 mat cam bien: s0 = -3.0, s1 = -1.0, s2 = +1.0, s3 = +3.0
+    // THUAT TOAN NOI SUY VACH & CHONG BAY KHOI LINE O NGA TU CHU X
     // ========================================================================
-    float computeLineError(const float s[4]) {
+    float computeLineError(const float s[4], double dt) {
         float w[4];
         for (int i = 0; i < 4; i++) {
-            float clean = clampf((s[i] - 0.08f) / 0.92f, 0.0f, 1.0f);
+            float clean = clampf((s[i] - 0.06f) / 0.94f, 0.0f, 1.0f);
             w[i] = clean * (0.75f + 0.25f * clean);
         }
 
-        bool both_wings_active = (w[0] > 0.40f && w[3] > 0.40f);
-        if (state == STATE_CROSS_LOCK) {
-            w[0] = 0.0f;
-            w[3] = 0.0f;
+        // --- XU LY NGA TU CHU X THONG MINH (KHONG KHOA MU TAY LAI!) ---
+        // Tai nga tu chu X (Vong tron 1 & 2), nhanh giao cat di vao tu 2 ben canh (w[0] va w[3]).
+        // Thay vi khoa cung tay lai trong 65ms lam xe lao vao khe trang giua chu '<',
+        // ta chi khu phan chung (common-mode) cua 2 canh ngoai ngay trong khoanh khac cat qua giao diem,
+        // va GIU NGUYEN 100% phan xa bam tam cua 2 mat giua (w[1], w[2])!
+        float raw_sum = w[0] + w[1] + w[2] + w[3];
+        bool center_strong = (w[1] > 0.32f || w[2] > 0.32f);
+        bool both_wings_active = (w[0] > 0.35f && w[3] > 0.35f);
+
+        // Neu xe dang bam tam (|pos_error| < 0.85) ma dot ngot 1 canh ngoai cham nhanh cheo cua chu X
+        // trong khi ca 2 mat giua van dang de len vach chinh (w[1] > 0.28 && w[2] > 0.28):
+        // Giam bớt trọng số của cánh ngoài để xe không bị nhánh chéo hút lệch khỏi đường thẳng!
+        if (center_locked && w[1] > 0.28f && w[2] > 0.28f && fabsf(pos_error) < 0.75f) {
+            w[0] *= 0.25f;
+            w[3] *= 0.25f;
         } else if (both_wings_active) {
-            if (w[1] > 0.22f || w[2] > 0.22f) {
-                w[0] = 0.0f;
-                w[3] = 0.0f;
-            } else if (last_valid_side != 0) {
-                if (last_valid_side > 0) w[0] = 0.0f;
+            if (center_strong) {
+                // Triệt tiêu đối xứng 2 cánh ngoài khi đang cắt qua tâm chữ X
+                float common_wing = min2f(w[0], w[3]);
+                w[0] -= common_wing * 0.90f;
+                w[3] -= common_wing * 0.90f;
+            } else {
+                // Nếu đang ở cua gắt gặp nhánh rẽ -> chỉ giữ mắt cùng phía với hướng cua
+                if (last_valid_side >= 0) w[0] = 0.0f;
                 else w[3] = 0.0f;
             }
         }
 
+        if (raw_sum > 1.75f && center_strong) {
+            in_cross_zone    = true;
+            cross_zone_timer = 0.035; // Duy trì giảm tốc nhẹ 35ms khi đi qua giao điểm chữ X
+        } else if (cross_zone_timer > 0.0) {
+            cross_zone_timer -= dt;
+            if (cross_zone_timer <= 0.0) in_cross_zone = false;
+        }
+
         float w_sum = w[0] + w[1] + w[2] + w[3];
 
-        // Neu ca 4 mat deu trang
+        // Xử lý khi cả 4 mắt đều trắng
         if (w_sum < 0.05f) {
-            if (state == STATE_CROSS_LOCK || last_valid_side == 0) return 0.0f;
-            if (center_locked && fabsf(pos_error) < 0.65f) {
-                return pos_error; // Vach manh lot khe giua s1-s2 -> giu nguyen huong thang
+            // Nếu trước đó vạch đang ở sát tâm (|pos_error| < 0.65) và mới khuất < 12ms -> giữ nguyên
+            if (center_locked && lost_line_time < 0.012 && fabsf(pos_error) < 0.65f) {
+                return pos_error;
             }
-            return (last_valid_side > 0) ? 4.20f : -4.20f;
+            // Nếu vạch đã lệch ra mép -> Khóa cứng sai số cực đại để bẻ cua ngay lập tức!
+            return (last_valid_side >= 0) ? 4.50f : -4.50f;
         }
 
         float num   = (-3.0f * w[0]) + (-1.0f * w[1]) + (1.0f * w[2]) + (3.0f * w[3]);
         float raw_e = num / w_sum;
 
-        // Ngoai suy suon ngoai khi chi con mat ngoai cung (s0 hoac s3) nhin thay vach
-        if (!both_wings_active && state == STATE_NORMAL_RACE) {
-            if (w[3] > 0.05f && w[2] < 0.12f && w[1] < 0.05f && w[0] < 0.05f) {
+        // NGOẠI SUY SƯỜN NGOÀI LIÊN TỤC (MƯỢT KHÔNG ĐIỂM GÃY ĐẠO HÀM):
+        if (!both_wings_active) {
+            // Sườn ngoài bên PHẢI (Mắt s3)
+            if (w[3] > 0.04f && w[2] < 0.16f && w[1] < 0.05f && w[0] < 0.05f) {
                 if (w[3] > outer_peak_memory) outer_peak_memory = w[3];
-                if (pos_error >= 2.10f || outer_peak_memory > 0.45f) {
+                if (pos_error >= 2.00f || outer_peak_memory > 0.45f) {
                     float decay_ratio = clampf((0.65f - w[3]) / 0.60f, 0.0f, 1.0f);
-                    float extrap_e    = 3.00f + 1.20f * decay_ratio;
-                    if (extrap_e > raw_e) raw_e = extrap_e;
+                    float extrap_e    = 3.00f + 1.45f * decay_ratio;
+                    float blend       = clampf((0.16f - w[2]) / 0.14f, 0.0f, 1.0f);
+                    raw_e             = lerpf(raw_e, max2f(raw_e, extrap_e), blend);
                 }
-            } else if (w[0] > 0.05f && w[1] < 0.12f && w[2] < 0.05f && w[3] < 0.05f) {
+            }
+            // Sườn ngoài bên TRÁI (Mắt s0)
+            else if (w[0] > 0.04f && w[1] < 0.16f && w[2] < 0.05f && w[3] < 0.05f) {
                 if (w[0] > outer_peak_memory) outer_peak_memory = w[0];
-                if (pos_error <= -2.10f || outer_peak_memory > 0.45f) {
+                if (pos_error <= -2.00f || outer_peak_memory > 0.45f) {
                     float decay_ratio = clampf((0.65f - w[0]) / 0.60f, 0.0f, 1.0f);
-                    float extrap_e    = -3.00f - 1.20f * decay_ratio;
-                    if (extrap_e < raw_e) raw_e = extrap_e;
+                    float extrap_e    = -3.00f - 1.45f * decay_ratio;
+                    float blend       = clampf((0.16f - w[1]) / 0.14f, 0.0f, 1.0f);
+                    raw_e             = lerpf(raw_e, min2f(raw_e, extrap_e), blend);
                 }
             } else if (w[1] > 0.25f || w[2] > 0.25f) {
                 outer_peak_memory = 0.0f;
             }
         }
 
-        if ((w[1] > 0.25f || w[2] > 0.25f) && w[0] < 0.18f && w[3] < 0.18f && fabsf(raw_e) < 0.90f) {
+        if ((w[1] > 0.22f || w[2] > 0.22f) && w[0] < 0.18f && w[3] < 0.18f && fabsf(raw_e) < 0.90f) {
             center_locked = true;
-        } else if (fabsf(raw_e) > 1.20f || w[0] > 0.35f || w[3] > 0.35f) {
+        } else if (fabsf(raw_e) > 1.15f || w[0] > 0.30f || w[3] > 0.30f) {
             center_locked = false;
         }
 
-        // Chi ghi nhan huong lech khi xe DANG CHAY TREN VACH va co tin hieu ro rang
-        if (!both_wings_active && (state == STATE_NORMAL_RACE || state == STATE_SOFT_LOCK)) {
-            if (w[3] > 0.25f || raw_e > 0.35f) {
+        if (!both_wings_active) {
+            if (w[3] > 0.15f || raw_e > 0.18f) {
                 last_valid_side = 1;
-            } else if (w[0] > 0.25f || raw_e < -0.35f) {
+            } else if (w[0] > 0.15f || raw_e < -0.18f) {
                 last_valid_side = -1;
             }
         }
 
-        return clampf(raw_e, -4.20f, 4.20f);
+        return clampf(raw_e, -4.50f, 4.50f);
     }
 
     // ========================================================================
-    // VONG LAP DIEU KHIEN CHINH 500Hz (CO MAY TRANG THAI CHONG XOAY 360)
+    // VONG LAP TINH TOAN DIEU KHIEN CHINH (500Hz)
     // ========================================================================
     void computeControl(const SensorData& s, double dt, int& pwm_left, int& pwm_right) {
-        state_time += dt;
-
-        int max_raw = max(max(s.raw_ir[0], s.raw_ir[1]), max(s.raw_ir[2], s.raw_ir[3]));
-        int min_raw = min(min(s.raw_ir[0], s.raw_ir[1]), min(s.raw_ir[2], s.raw_ir[3]));
-
         float max_ir = max4f(s.ir[0], s.ir[1], s.ir[2], s.ir[3]);
+        float min_ir = min4f(s.ir[0], s.ir[1], s.ir[2], s.ir[3]);
 
-        // Kiem tra xe bi nhac len khong trung (ca 4 mat deu den bao hoa hoac deu lo lung)
-        bool lifted_in_air = (min_raw > 2600);
-        // Kiem tra co vach den thuc su duoi gam xe (co do tuong phan ro rang giua cac mat)
-        bool line_present  = (!lifted_in_air) && (max_ir > 0.28f) && (s.contrast_span > 350 || max_raw > 1100);
-        // Kiem tra vach dang nam o 2 mat trung tam (s1, s2)
-        bool center_seen   = (!lifted_in_air) && (s.ir[1] > 0.30f || s.ir[2] > 0.30f) && (s.contrast_span > 350);
+        bool all_white_out = (max_ir < 0.10f);
+        bool all_black_air = (min_ir > 0.88f);
 
-        // --------------------------------------------------------------------
-        // 1. BAO VE KHI NHAC XE LEN KHONG TRUNG -> DUNG NGAY LAP TUC!
-        // --------------------------------------------------------------------
-        if (lifted_in_air) {
-            changeState(STATE_SAFE_HALT);
-            last_valid_side = 0;
-            pwm_left  = 0;
-            pwm_right = 0;
-            return;
-        }
-
-        // --------------------------------------------------------------------
-        // 2. XU LY TRANG THAI CHO VACH (WAIT_LINE) & DUNG AN TOAN (SAFE_HALT)
-        // -> Giai quyet triet de loi:
-        //    + Bat cong tac len ngoai vach tu xoay 360
-        //    + Nhac xe tu ngoai dat vao vach tu xoay 360
-        //    + Vang khoi vach xoay 360 vinh vien
-        // --------------------------------------------------------------------
-        if (state == STATE_WAIT_LINE || state == STATE_SAFE_HALT) {
-            pwm_left  = 0;
-            pwm_right = 0;
-
-            // Chi khi ban dat xe len vach den (1 trong 2 mat giua s1, s2 nhin thay vach)
-            // va giu on dinh tren vach >= 60ms (30 chu ky) de tay ban roi ra hoan toan,
-            // xe moi bat dau khoi hanh o che do SOFT_LOCK!
-            if (center_seen) {
-                if (state_time >= 0.060) {
+        // 1. Bảo vệ khi nhấc xe khỏi sàn
+        if ((all_white_out || all_black_air) && state != STATE_SHORTCUT_TURN) {
+            off_track_time += dt;
+            if (off_track_time > 0.85) was_lifted = true;
+        } else {
+            if (was_lifted) {
+                if ((s.ir[1] > 0.35f || s.ir[2] > 0.35f) && min_ir < 0.45f) {
                     reset(s.elapsed_sec);
-                    state            = STATE_SOFT_LOCK;
-                    state_time       = 0.0;
-                    soft_start_timer = 0.0;
-                    float init_e     = computeLineError(s.ir);
-                    pos_error        = init_e;
-                    prev_pos_error   = init_e;
-                    filtered_error   = init_e;
+                    has_seen_line = true;
                 }
             } else {
-                // Chua dat dung vach -> reset bo dem thoi gian, giu dong co dung im 100%
-                state_time = 0.0;
+                if (max_ir >= 0.20f && min_ir < 0.75f) {
+                    if (!has_seen_line) run_start_time = s.elapsed_sec;
+                    has_seen_line = true;
+                }
+                off_track_time = 0.0;
             }
+        }
+
+        if (was_lifted) {
+            active_run_time = 0.0;
+            pwm_left  = 0;
+            pwm_right = 0;
             return;
         }
 
-        // --------------------------------------------------------------------
-        // 3. TRANG THAI KHOI HANH EM & KHOA TAM VACH (STATE_SOFT_LOCK)
-        // Trong 180ms dau tien sau khi dat xe vao vach:
-        // - Tang toc muot (Soft-Start) de khong sut ap pin
-        // - CAM HOAN TOAN banh xe quay nguoc chieu (khong bao gio xoay 360 khi vua cham vach)
-        // --------------------------------------------------------------------
-        if (state == STATE_SOFT_LOCK) {
-            if (!line_present) {
-                // Neu vua nhac tay ra ma xe bi truot khoi vach ngay -> dung im, khong xoay!
-                if (state_time > 0.050) {
-                    changeState(STATE_WAIT_LINE);
-                    pwm_left  = 0;
-                    pwm_right = 0;
-                    return;
-                }
-            } else if (state_time >= 0.180) {
-                // Da bam vach on dinh -> Mo khoa sang che do dua full toc do!
-                changeState(STATE_NORMAL_RACE);
-            }
+        active_run_time += dt;
+
+        if (all_white_out) {
+            lost_line_time += dt;
+        } else {
+            lost_line_time = 0.0;
         }
 
-        // --------------------------------------------------------------------
-        // 4. XU LY KHI MAT VACH O KHUC CUA (STATE_ARC_RECOVERY) - CHONG XOAY 360!
-        // --------------------------------------------------------------------
-        if (state == STATE_NORMAL_RACE && !line_present) {
-            // Neu vach dang o sat tam (lot khe giua s1-s2), cho phep di thang 14ms
-            if (center_locked && fabsf(filtered_error) < 0.65f && state_time < 0.014) {
-                // Giu nguyen trang thai
-            } else if (last_valid_side != 0) {
-                // Chuyen sang che do quet cung ngan de bat lai vach
-                changeState(STATE_ARC_RECOVERY);
-                was_in_recovery = true;
-            } else {
-                changeState(STATE_SAFE_HALT);
-                pwm_left  = 0;
-                pwm_right = 0;
-                return;
-            }
-        }
-
-        if (state == STATE_ARC_RECOVERY) {
-            // A. Neu bat lai duoc vach den -> Kich hoat PHANH D-CATCH de khoa vach ngay,
-            //    KHONG cho dau xe lao vuot qua vach sang ben kia!
-            if (line_present) {
-                changeState(STATE_NORMAL_RACE);
-                catch_brake_timer = 0.045; // Kich hoat 45ms giam chan manh khi vua bat lai vach
-                float new_e    = computeLineError(s.ir);
-                pos_error      = new_e;
-                prev_pos_error = new_e;
-                filtered_error = new_e;
-                // Tao xung dao ham nguoc chieu quay de dap phanh goc ngay lap tuc!
-                filtered_deriv = (last_valid_side > 0) ? -85.0f : 85.0f;
-            }
-            // B. GIOI HAN THOI GIAN TIM VACH TOI DA 260ms (~ Goc quay 110 do):
-            //    Neu sau 260ms van khong thay vach -> Xe da vang khoi ban dua!
-            //    NGAT DONG CO DUNG NGAY LAP TUC (STATE_SAFE_HALT), TUYET DOI KHONG XOAY 360!
-            else if (state_time > 0.260) {
-                changeState(STATE_SAFE_HALT);
-                pwm_left  = 0;
-                pwm_right = 0;
-                return;
-            }
-            // C. Trong 260ms dau khi chom mat vach o cua gat:
-            //    Quay cung muot voi toc do vua phai de mat cam bien kip bat vach, khong quay dien loan!
-            else {
-                float rec_progress = clampf((float)(state_time / 0.180), 0.0f, 1.0f);
-                float outer_pwm    = lerpf(185.0f, 160.0f, rec_progress); // Giam dan banh ngoai de thu hep ban kinh
-                float inner_pwm    = lerpf(-65.0f, -95.0f, rec_progress); // Phanh nhe banh trong (khong quay -165 gay sut ap!)
-
-                if (last_valid_side > 0) {
-                    pwm_left  = (int)outer_pwm;
-                    pwm_right = (int)inner_pwm;
-                } else {
-                    pwm_left  = (int)inner_pwm;
-                    pwm_right = (int)outer_pwm;
-                }
-                updateVirtualOdometry(pwm_left, pwm_right, dt);
-                return;
-            }
-        }
-
-        // --------------------------------------------------------------------
-        // 5. XU LY NGA TU & RE TAT (Neu ENABLE_CROSS_SHORTCUT == 1)
-        // --------------------------------------------------------------------
-        if (ENABLE_CROSS_SHORTCUT && (state == STATE_NORMAL_RACE || state == STATE_CROSS_LOCK ||
-                                      state == STATE_SHORTCUT_ALIGN || state == STATE_SHORTCUT_TURN)) {
+        // 2. Xử lý Rẽ tắt Ngã tư Vòng tròn 2 (chỉ hoạt động khi ENABLE_CROSS_SHORTCUT == 1)
+        if (ENABLE_CROSS_SHORTCUT && has_seen_line && off_track_time < 0.05) {
             double dist_since_cross = total_dist_m - cross_dist_m;
             double run_elapsed      = s.elapsed_sec - run_start_time;
 
@@ -545,50 +387,46 @@ public:
                     cross_yaw_rad     = total_yaw_rad;
                     max_yaw_excursion = 0.0;
 
-                    if (cross_count < SHORTCUT_CROSS_COUNT) {
-                        changeState(STATE_CROSS_LOCK);
-                    } else {
-                        changeState(STATE_SHORTCUT_ALIGN);
+                    if (cross_count >= SHORTCUT_CROSS_COUNT) {
+                        enterState(STATE_SHORTCUT_ALIGN, s.elapsed_sec);
                     }
                 }
             }
 
-            if (state == STATE_CROSS_LOCK) {
-                bool cleared_wings = (state_time > 0.035 && s.ir[0] < 0.20f && s.ir[3] < 0.20f);
-                if (cleared_wings || state_time > 0.070) {
-                    changeState(STATE_NORMAL_RACE);
-                }
-            } else if (state == STATE_SHORTCUT_ALIGN) {
-                if (state_time < 0.050) {
+            double state_dur = s.elapsed_sec - state_enter_time;
+
+            if (state == STATE_SHORTCUT_ALIGN) {
+                if (state_dur < 0.045) {
                     pwm_left  = 185;
                     pwm_right = 185;
                     updateVirtualOdometry(pwm_left, pwm_right, dt);
                     return;
                 } else {
-                    changeState(STATE_SHORTCUT_TURN);
+                    enterState(STATE_SHORTCUT_TURN, s.elapsed_sec);
+                    state_dur = 0.0;
                 }
             }
 
             if (state == STATE_SHORTCUT_TURN) {
-                if (state_time < 0.12) {
-                    pwm_left  =  195;
-                    pwm_right = -110;
+                if (state_dur < 0.13) {
+                    pwm_left  =  215;
+                    pwm_right = -135;
                     last_valid_side = 1;
                     updateVirtualOdometry(pwm_left, pwm_right, dt);
                     return;
                 }
-                if (s.ir[1] > 0.42f || s.ir[2] > 0.42f || state_time > 0.32) {
+                if (s.ir[1] > 0.42f || s.ir[2] > 0.42f || state_dur > 0.36) {
                     shortcut_taken = true;
-                    changeState(STATE_NORMAL_RACE);
-                    float init_err  = computeLineError(s.ir);
-                    pos_error       = init_err;
-                    prev_pos_error  = init_err;
-                    filtered_error  = init_err;
-                    filtered_deriv  = 0.0f;
+                    state          = STATE_NORMAL_RACE;
+                    float init_err = computeLineError(s.ir, dt);
+                    pos_error      = init_err;
+                    prev_pos_error = init_err;
+                    filtered_error = init_err;
+                    filtered_deriv = 0.0f;
                     last_valid_side = 1;
                 } else {
-                    pwm_left  =  175;
-                    pwm_right = -95;
+                    pwm_left  =  195;
+                    pwm_right = -115;
                     last_valid_side = 1;
                     updateVirtualOdometry(pwm_left, pwm_right, dt);
                     return;
@@ -596,117 +434,143 @@ public:
             }
         }
 
-        // --------------------------------------------------------------------
-        // 6. TINH TOAN DIEU KHIEN PD PHI TUYEN & BAM LINE SIEU MUOT
-        // --------------------------------------------------------------------
+        // 3. TÍNH SAI SỐ & BỘ LỌC ĐẠO HÀM ÊM MƯỢT (KHÔNG GIẬT CỤC TRONG CUA!)
         prev_pos_error = pos_error;
-        pos_error      = computeLineError(s.ir);
+        pos_error      = computeLineError(s.ir, dt);
 
-        filtered_error = 0.20f * filtered_error + 0.80f * pos_error;
+        if (was_all_white && !all_white_out) {
+            prev_pos_error = pos_error;
+            filtered_error = pos_error;
+            filtered_deriv *= 0.25f;
+        }
+        was_all_white = all_white_out;
+
+        // Bộ lọc cho P vừa đủ nhạy vừa khử gai nhiễu (alpha = 0.72)
+        filtered_error = 0.28f * filtered_error + 0.72f * pos_error;
 
         float raw_deriv = 0.0f;
-        if (dt > 0.0002) {
+        if (!all_white_out && dt > 0.0002) {
             raw_deriv = (pos_error - prev_pos_error) / (float)dt;
-            raw_deriv = clampf(raw_deriv, -200.0f, 200.0f);
+            raw_deriv = clampf(raw_deriv, -180.0f, 180.0f);
         }
 
-        float alpha_d  = clampf((float)(dt / (0.0060 + dt)), 0.18f, 0.55f);
+        // Hằng số lọc EMA tau_d = 8.5ms giúp lực D mượt như nhung, triệt tiêu hoàn toàn hiện tượng giật cục trong cua!
+        float alpha_d  = clampf((float)(dt / (0.0085 + dt)), 0.15f, 0.42f);
         filtered_deriv = (1.0f - alpha_d) * filtered_deriv + alpha_d * raw_deriv;
 
         float abs_e = fabsf(filtered_error);
         float abs_d = fabsf(filtered_deriv);
 
-        // Tich luy thoi gian duong thang
-        if (abs_e < 0.70f && state == STATE_NORMAL_RACE) {
+        // 4. QUỸ ĐẠO TỐC ĐỘ THÍCH ỨNG: ĐƯỜNG THẲNG NHANH, CHỚM VÀO CUA LÀ RÀ PHANH NGAY!
+        if (abs_e < 0.70f && !all_white_out && !in_cross_zone) {
             straight_time = min2f((float)(straight_time + dt), 0.25f);
-        } else if (abs_e > 1.25f) {
-            straight_time = 0.0;
+        } else if (abs_e > 1.25f || all_white_out) {
+            straight_time = 0.0; // Ngắt Turbo ngay lập tức khi chớm vào cua!
         } else {
-            straight_time = max2f(0.0f, (float)(straight_time - 2.0 * dt));
+            straight_time = max2f(0.0f, (float)(straight_time - 2.0f * dt));
         }
 
-        float turbo_ratio = clampf((float)(straight_time / 0.14), 0.0f, 1.0f);
+        float turbo_ratio = clampf((float)(straight_time / 0.10), 0.0f, 1.0f);
         float peak_base   = lerpf(NOMINAL_BASE_PWM, STRAIGHT_MAX_PWM, turbo_ratio);
 
-        float err_penalty   = CURVE_SLOWDOWN_KE * powf(max2f(0.0f, abs_e - 0.12f), 1.30f);
-        float deriv_penalty = CURVE_SLOWDOWN_KD * max2f(0.0f, abs_d - 10.0f);
+        // Giảm tốc độ nền sớm ngay khi |e| > 0.15 để bánh xe bám chặt xuống mặt bàn khi vào cua!
+        float err_penalty   = CURVE_SLOWDOWN_KE * powf(max2f(0.0f, abs_e - 0.15f), 1.30f);
+        float deriv_penalty = CURVE_SLOWDOWN_KD * max2f(0.0f, abs_d - 12.0f);
         float target_base   = clampf(peak_base - err_penalty - deriv_penalty, CORNER_MIN_PWM, STRAIGHT_MAX_PWM);
 
-        // Neu vua thoat khoi ARC_RECOVERY (vua bat lai vach), ha toc do nen trong 45ms de xe on dinh
-        if (catch_brake_timer > 0.0) {
-            catch_brake_timer = max2f(0.0f, (float)(catch_brake_timer - dt));
-            target_base = min2f(target_base, 125.0f);
+        // Khi đang đi qua giao điểm Ngã tư chữ X (in_cross_zone), tự động kìm tốc độ ở mức 170 PWM
+        // để xe đi thẳng qua giao lộ chữ X cực kỳ đằm và chuẩn xác, không bị bay vào khe trắng!
+        if (in_cross_zone && target_base > 170.0f) {
+            target_base = 170.0f;
         }
 
-        // Neu dang o pha khoi hanh mem (SOFT_LOCK 180ms dau tien), tang toc tu tu tu 110 len target_base
-        soft_start_timer = min2f(0.30f, (float)(soft_start_timer + dt));
-        if (soft_start_timer < 0.20f) {
-            float ramp = clampf((float)(soft_start_timer / 0.20f), 0.0f, 1.0f);
-            target_base = min2f(target_base, lerpf(115.0f, NOMINAL_BASE_PWM, ramp));
+        if (active_run_time < 0.150) {
+            float soft_launch = clampf((float)(active_run_time / 0.150), 0.58f, 1.0f);
+            target_base *= soft_launch;
         }
 
-        // Tinh luc lai PD phi tuyen
-        float center_softener = (abs_e < 0.35f) ? (0.85f + 0.42f * abs_e) : 1.0f;
+        // 5. TÍNH LỰC LÁI PD PHI TUYẾN LIÊN TỤC (KHÔNG NHẢY BẬC GÂY GIẬT)
+        float center_softener = (abs_e < 0.40f) ? (0.88f + 0.30f * abs_e) : 1.0f;
         float p_term = (KP_BASE * center_softener) * filtered_error
                      + KP_NONLINEAR * filtered_error * abs_e;
 
-        float effective_kd = KD_BASE + KD_CORNER_BOOST * clampf(abs_e / 2.40f, 0.0f, 1.2f);
-        if (catch_brake_timer > 0.0) effective_kd *= 1.45f; // Tang giam chan D khi vua bat lai vach
-        float d_term = effective_kd * filtered_deriv;
+        float effective_kd = KD_BASE + KD_CORNER_BOOST * clampf(abs_e / 2.50f, 0.0f, 1.15f);
+        float d_term       = effective_kd * filtered_deriv;
 
-        float turn_effort = p_term + d_term;
-        if (state == STATE_CROSS_LOCK) {
-            target_base = NOMINAL_BASE_PWM;
-            turn_effort = clampf(turn_effort, -40.0f, 40.0f);
-        } else if (state == STATE_SOFT_LOCK) {
-            turn_effort = clampf(turn_effort, -110.0f, 110.0f);
+        float turn_effort  = clampf(p_term + d_term, -360.0f, 360.0f);
+
+        // 6. PHỐI LỰC VI SAI MƯỢT MÀ & KHÓA CUA TỨC THÌ (10ms) KHI MẤT VẠCH Ở CUA
+        float v_left = 0.0f, v_right = 0.0f;
+
+        // Khôi phục phản xạ bắt cua 10ms cực nhạy để xe không bao giờ bị văng khỏi khúc cua gắt!
+        bool corner_line_lost = (all_white_out && state == STATE_NORMAL_RACE &&
+                                 (!center_locked || lost_line_time >= 0.010));
+
+        if (!has_seen_line) {
+            if (off_track_time < 0.45) {
+                v_left  = 150.0f;
+                v_right = 150.0f;
+            }
+        } else if (off_track_time > 0.85) {
+            v_left  = 0.0f;
+            v_right = 0.0f;
+        } else if (corner_line_lost) {
+            // PIVOT RECOVERY MƯỢT NHƯNG DỨT KHOÁT:
+            float lost_boost = clampf((float)(lost_line_time / 0.055), 0.0f, 1.0f);
+            float outer_pwm  = lerpf(205.0f, 235.0f, lost_boost);
+            float inner_pwm  = lerpf(-105.0f, MAX_REVERSE_PWM, lost_boost);
+
+            if (last_valid_side >= 0) {
+                v_left  = outer_pwm;
+                v_right = inner_pwm;
+            } else {
+                v_left  = inner_pwm;
+                v_right = outer_pwm;
+            }
         } else {
-            turn_effort = clampf(turn_effort, -340.0f, 340.0f);
+            v_left  = target_base + turn_effort;
+            v_right = target_base - turn_effort;
+
+            if (v_left > MAX_PWM_OUT) {
+                float excess = v_left - MAX_PWM_OUT;
+                v_left   = MAX_PWM_OUT;
+                v_right -= 0.78f * excess;
+            } else if (v_right > MAX_PWM_OUT) {
+                float excess = v_right - MAX_PWM_OUT;
+                v_right  = MAX_PWM_OUT;
+                v_left  -= 0.78f * excess;
+            }
+
+            // Mở khóa phanh đảo chiều bánh trong mượt mà theo độ lệch |e|
+            float rev_allow   = clampf((abs_e - 0.75f) / 1.95f, 0.0f, 1.0f);
+            float min_allowed = lerpf(0.0f, MAX_REVERSE_PWM, rev_allow);
+
+            v_left  = clampf(v_left,  min_allowed, MAX_PWM_OUT);
+            v_right = clampf(v_right, min_allowed, MAX_PWM_OUT);
         }
 
-        // Phoi luc vi sai bat doi xung (Asymmetric Torque Vectoring)
-        float v_left  = target_base + turn_effort;
-        float v_right = target_base - turn_effort;
-
-        if (v_left > MAX_PWM_OUT) {
-            float excess = v_left - MAX_PWM_OUT;
-            v_left   = MAX_PWM_OUT;
-            v_right -= 0.80f * excess;
-        } else if (v_right > MAX_PWM_OUT) {
-            float excess = v_right - MAX_PWM_OUT;
-            v_right  = MAX_PWM_OUT;
-            v_left  -= 0.80f * excess;
-        }
-
-        // QUY TAC CHONG XOAY:
-        // - Khi o STATE_SOFT_LOCK hoac sai so |e| < 0.85: KHONG cho phep banh trong quay lui (min_allowed >= 0)
-        // - Chi khi vao cua gat thuc su (|e| > 0.85 o STATE_NORMAL_RACE) moi cho phanh lui muot toi MAX_REVERSE_PWM
-        float min_allowed = 0.0f;
-        if (state == STATE_NORMAL_RACE && abs_e > 0.85f) {
-            float rev_allow = clampf((abs_e - 0.85f) / 2.15f, 0.0f, 1.0f);
-            min_allowed = lerpf(0.0f, MAX_REVERSE_PWM, rev_allow);
-        }
-
-        v_left  = clampf(v_left,  min_allowed, MAX_PWM_OUT);
-        v_right = clampf(v_right, min_allowed, MAX_PWM_OUT);
-
-        pwm_left  = (int)v_left;
-        pwm_right = (int)v_right;
+        pwm_left  = (int)clampf(v_left,  -MAX_PWM_OUT, MAX_PWM_OUT);
+        pwm_right = (int)clampf(v_right, -MAX_PWM_OUT, MAX_PWM_OUT);
 
         updateVirtualOdometry(pwm_left, pwm_right, dt);
     }
 };
 
 // ============================================================================
-// 6. DIEU KHIEN PHAN CUNG DONG CO & CHONG SUT AP PIN (ANTI-BROWNOUT)
+// 5. DIEU KHIEN PHAN CUNG SIÊU MƯỢT (KHÔNG BƯỚC NHẢY VÙNG CHẾT TRONG CUA)
 // ============================================================================
 CobotBrain brain;
-SmartSensorNormalizer sensorNorm;
+
+int ir_white_cal[4] = {300, 300, 300, 300};
+int ir_black_cal[4] = {2400, 2400, 2400, 2400};
 
 unsigned long startMicros         = 0;
 unsigned long lastStepMicros      = 0;
 unsigned long lastTelemetryMillis = 0;
+uint32_t      loopFrameCount      = 0;
+
 int prev_hw_pwm_l = 0, prev_hw_pwm_r = 0;
+int zero_cross_hold_l = 0, zero_cross_hold_r = 0;
 
 void setupMotorsHardware() {
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
@@ -736,45 +600,44 @@ static inline void writeLEDC(int channel, int pwm) {
 #endif
 }
 
+// Bù ma sát tĩnh mượt (Smooth Deadzone): Không nhảy bậc đột ngột quanh điểm 0
+// để bánh trong không bị giật khựng khi rà phanh trong khúc cua!
 static inline int applyN20Deadzone(int pwm) {
     if (pwm == 0) return 0;
     int mag = abs(pwm);
-    if (mag >= 245) return (pwm > 0) ? 245 : -245;
-    int out = MIN_N20_PWM + ((mag * (245 - MIN_N20_PWM)) / 245);
-    out = constrain(out, 0, 245);
+    if (mag >= 250) return (pwm > 0) ? 255 : -255;
+    int out;
+    if (mag < 20) {
+        // Vùng chuyển tiếp tuyến tính mềm quanh điểm 0 (0..20 -> 0..48) chống giật bánh trong!
+        out = (mag * (MIN_N20_PWM + 14)) / 20;
+    } else {
+        out = MIN_N20_PWM + ((mag * (255 - MIN_N20_PWM)) / 255);
+    }
+    out = constrain(out, 0, 255);
     return (pwm > 0) ? out : -out;
 }
 
-// ============================================================================
-// BO GIOI HAN DONG KHOI DONG & CHONG DAO CHIEU DOT NGOT (ANTI-BROWNOUT SLEW)
-// - Ngan chan tuyet doi hien tuong dong co N20 dao chieu tu +230 sang -130
-//   trong 1 chu ky lam sut ap pin va reset ESP32!
-// - Neu dong co dang quay tien (> 0) ma lenh yeu cau quay lui (< 0),
-//   bat buoc di qua diem 0 (Short-Brake Discharge) de triet tieu dong xung nguoc.
-// ============================================================================
-static inline int slewLimitPWM(int target, int prev) {
-    if (target == 0 && abs(prev) < 45) return 0;
+static inline int slewLimitPWM(int target, int prev, int& zero_hold) {
+    if (zero_hold > 0) {
+        zero_hold--;
+        return 0;
+    }
 
-    // Chong dao chieu truc tiep qua 0 trong 1 chu ky (Nguyen nhan so 1 gay sut ap pin!)
-    if ((prev > 0 && target < 0) || (prev < 0 && target > 0)) {
-        if (abs(prev) > 55) {
-            return (prev > 0) ? (prev - 55) : (prev + 55);
-        }
-        return 0; // Dung 1 chu ky (2ms) tai 0V de xa dong cam ung truoc khi dao chieu
+    // Chỉ nghỉ 1 chu kỳ (2ms) ở điểm 0 khi đảo chiều từ tốc độ cao (|prev| > 90) để bảo vệ Pin
+    // Còn khi bánh trong đang rà chậm quanh 0 ở trong cua thì cho lướt mượt qua luôn, không khựng!
+    if ((target < 0 && prev > 90) || (target > 0 && prev < -90)) {
+        zero_hold = 1;
+        return 0;
     }
 
     int diff = target - prev;
-    bool is_accelerating_mag = (abs(target) > abs(prev));
-
-    if (is_accelerating_mag) {
-        // Gioi han toc do tang PWM: 28 don vi / 2ms (~ 35ms de len max) -> Khong bao gio sut ap pin!
-        if (diff > 28)  return prev + 28;
-        if (diff < -28) return prev - 28;
+    bool is_accelerating_forward = (target > prev && prev >= 0);
+    if (is_accelerating_forward) {
+        if (diff > 55) return prev + 55;
         return target;
     } else {
-        // Giam toc ve 0: nhanh va muot (85 don vi / 2ms)
-        if (diff > 85)  return prev + 85;
-        if (diff < -85) return prev - 85;
+        if (diff > 150)  return prev + 150;
+        if (diff < -150) return prev - 150;
         return target;
     }
 }
@@ -789,18 +652,8 @@ void setMotorHardware(int pwm_l, int pwm_r) {
     int target_l = applyN20Deadzone(pwm_l);
     int target_r = applyN20Deadzone((int)(pwm_r * RIGHT_MOTOR_TRIM));
 
-    int out_l = slewLimitPWM(target_l, prev_hw_pwm_l);
-    int out_r = slewLimitPWM(target_r, prev_hw_pwm_r);
-
-    // Gioi han tong cong suat tuc thoi (Power Budget Cap) khi chay pin:
-    // Neu 1 banh dang tien manh va 1 banh dang phanh nguoc, giu tong bien do <= 345
-    int total_current_load = abs(out_l) + abs(out_r);
-    if ((out_l * out_r < 0) && total_current_load > 345) {
-        float scale = 345.0f / (float)total_current_load;
-        out_l = (int)(out_l * scale);
-        out_r = (int)(out_r * scale);
-    }
-
+    int out_l = slewLimitPWM(target_l, prev_hw_pwm_l, zero_cross_hold_l);
+    int out_r = slewLimitPWM(target_r, prev_hw_pwm_r, zero_cross_hold_r);
     prev_hw_pwm_l = out_l;
     prev_hw_pwm_r = out_r;
 
@@ -821,79 +674,110 @@ void setMotorHardware(int pwm_l, int pwm_r) {
     }
 }
 
-// Doc ADC kem bo loc Trung vi 5 mau (Median-of-5) + Xa dien tich MUX ADC ESP32
 static inline int readIRFiltered(int pin) {
-    (void)analogRead(pin); // Xa dien tich kenh MUX truoc do
-    int v[5];
-    for (int i = 0; i < 5; i++) {
-        v[i] = analogRead(pin);
-    }
-    // Sap xep nhanh 5 phan tu lay trung vi (loai bo 100% gai nhieu xung PWM dong co)
-    for (int i = 0; i < 4; i++) {
-        for (int j = i + 1; j < 5; j++) {
-            if (v[j] < v[i]) {
-                int tmp = v[i]; v[i] = v[j]; v[j] = tmp;
-            }
-        }
-    }
-    return v[2];
+    (void)analogRead(pin);
+    int a = analogRead(pin);
+    int b = analogRead(pin);
+    int c = analogRead(pin);
+    int hi = (a > b) ? a : b;
+    int lo = (a < b) ? a : b;
+    return (c > hi) ? hi : ((c < lo) ? lo : c);
 }
 
 // ============================================================================
-// 7. KHOI TAO HE THONG VOI 3 GIAY AN TOAN TUYET DOI
+// 6. KHOI TAO HE THONG & AUTO-CALIB
 // ============================================================================
 void setup() {
-    // 1. KHOA CUNG DONG CO = 0 NGAY DONG DAU TIEN KHI VUA CAP NGUON PIN!
-    setupMotorsHardware();
-    writeLEDC(CH_L_A, 0);
-    writeLEDC(CH_L_B, 0);
-    writeLEDC(CH_R_A, 0);
-    writeLEDC(CH_R_B, 0);
+#if defined(RTC_CNTL_BROWN_OUT_REG) && defined(RTC_CNTL_BROWN_OUT_ENA)
+    REG_CLR_BIT(RTC_CNTL_BROWN_OUT_REG, RTC_CNTL_BROWN_OUT_ENA);
+#endif
 
-    // 2. Bat LED hong ngoai doc line (da bo hoan toan W_LED_ON)
+    pinMode(PWM_PIN_L_A, OUTPUT); digitalWrite(PWM_PIN_L_A, LOW);
+    pinMode(PWM_PIN_L_B, OUTPUT); digitalWrite(PWM_PIN_L_B, LOW);
+    pinMode(PWM_PIN_R_A, OUTPUT); digitalWrite(PWM_PIN_R_A, LOW);
+    pinMode(PWM_PIN_R_B, OUTPUT); digitalWrite(PWM_PIN_R_B, LOW);
+
     pinMode(IR_LED_ON, OUTPUT);
     digitalWrite(IR_LED_ON, HIGH);
+    pinMode(W_LED_ON, OUTPUT);
+    digitalWrite(W_LED_ON, LOW);
+
+#if defined(ESP32)
+    WiFi.mode(WIFI_OFF);
+    btStop();
+    analogReadResolution(12);
+#endif
 
 #if ENABLE_SERIAL_TELEMETRY
     Serial.begin(115200);
     Serial.setTxTimeoutMs(0);
 #endif
 
-#if defined(ESP32)
-    analogReadResolution(12);
-#endif
-
     for (int i = 0; i < 4; i++) {
         pinMode(PIN_IR[i], INPUT);
     }
 
-    // 3. THOI GIAN CHO AN TOAN 3.0 GIAY (STARTUP_SAFE_DELAY_MS):
-    // - Trong 2.2 giay dau: Cho ban dat xe ngay ngan vao vach, rut tay ra xa, va de ap pin on dinh.
-    // - Trong 0.8 giay cuoi: Do mau nen trang / vach den tinh khi xe da nam im tren san.
-    unsigned long bootStart = millis();
-    int min_seen[4] = {4095, 4095, 4095, 4095};
-    int max_seen[4] = {0, 0, 0, 0};
+    setupMotorsHardware();
+    setMotorHardware(0, 0);
 
-    while (millis() - bootStart < STARTUP_SAFE_DELAY_MS) {
-        // Luon giu dong co = 0 trong suot 3 giay khoi dong
-        writeLEDC(CH_L_A, 0);
-        writeLEDC(CH_L_B, 0);
-        writeLEDC(CH_R_A, 0);
-        writeLEDC(CH_R_B, 0);
-
-        // Chi thu thap mau calib trong 800ms cuoi cung (khi tay nguoi dung da buong ra hoan toan)
-        if (millis() - bootStart >= (STARTUP_SAFE_DELAY_MS - 800UL)) {
-            for (int i = 0; i < 4; i++) {
-                int val = readIRFiltered(PIN_IR[i]);
-                if (val < min_seen[i]) min_seen[i] = val;
-                if (val > max_seen[i]) max_seen[i] = val;
-            }
-        }
-        delay(5);
+    // Bước 1: Đợi người thi đặt xe xuống sàn
+    unsigned long waitStart = millis();
+    while (millis() - waitStart < 1200) {
+        int r0 = readIRFiltered(PIN_IR[0]);
+        int r3 = readIRFiltered(PIN_IR[3]);
+        if (r0 < 1500 || r3 < 1500) break;
+        delay(8);
     }
 
-    // 4. Khoi tao Bo Chuan Hoa Vi Sai Khong Gian
-    sensorNorm.initFromStartupSamples(min_seen, max_seen);
+    // Bước 2: Chờ tay người dùng rời khỏi xe
+    unsigned long settleStart = millis();
+    int prev_calib[4] = {readIRFiltered(PIN_IR[0]), readIRFiltered(PIN_IR[1]),
+                         readIRFiltered(PIN_IR[2]), readIRFiltered(PIN_IR[3])};
+    while (millis() - settleStart < 90) {
+        delay(12);
+        int max_diff = 0;
+        for (int i = 0; i < 4; i++) {
+            int cur = readIRFiltered(PIN_IR[i]);
+            int d = abs(cur - prev_calib[i]);
+            if (d > max_diff) max_diff = d;
+            prev_calib[i] = cur;
+        }
+        if (max_diff < 100) break;
+    }
+
+    // Bước 3: Đo mẫu nhanh tại vị trí xuất phát
+    int min_seen[4] = {4095, 4095, 4095, 4095};
+    int max_seen[4] = {0, 0, 0, 0};
+    for (int sample = 0; sample < 20; sample++) {
+        for (int i = 0; i < 4; i++) {
+            int v = readIRFiltered(PIN_IR[i]);
+            if (v < min_seen[i]) min_seen[i] = v;
+            if (v > max_seen[i]) max_seen[i] = v;
+        }
+        delay(3);
+    }
+
+    int global_min = min(min(min_seen[0], min_seen[1]), min(min_seen[2], min_seen[3]));
+    int global_max = max(max(max_seen[0], max_seen[1]), max(max_seen[2], max_seen[3]));
+
+    if (global_min > 1200) global_min = 320;
+    if (global_max < global_min + 650 || global_max > 3850) {
+        global_max = constrain(global_min + 1500, 1400, 3200);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        if (min_seen[i] < global_min + 220) {
+            ir_white_cal[i] = min_seen[i];
+        } else {
+            ir_white_cal[i] = global_min;
+        }
+
+        if (max_seen[i] > ir_white_cal[i] + 650 && max_seen[i] < 3850) {
+            ir_black_cal[i] = max_seen[i];
+        } else {
+            ir_black_cal[i] = max(global_max, ir_white_cal[i] + 1200);
+        }
+    }
 
     brain.reset(0.0);
     startMicros    = micros();
@@ -901,29 +785,67 @@ void setup() {
 }
 
 // ============================================================================
-// 8. VONG LAP THOI GIAN THUC 500Hz (CHU KY CHUAN 2000 MICROSECONDS)
+// 7. VONG LAP THOI GIAN THUC 500Hz (CHU KY CHUAN 2000 MICROSECONDS)
 // ============================================================================
 void loop() {
     unsigned long nowMicros = micros();
     unsigned long diffMicros = nowMicros - lastStepMicros;
-    if (diffMicros < 2000) return; // Khoa tan so dieu khien chuan 500Hz (dt = 2.0ms)
+    if (diffMicros < 2000) return;
     lastStepMicros = nowMicros;
 
     double dt = diffMicros * 1e-6;
     if (dt > 0.025) dt = 0.002;
 
+    loopFrameCount++;
+
     SensorData sData;
     sData.elapsed_sec = (nowMicros - startMicros) * 1e-6;
 
-    // 1. Doc 4 mat cam bien IR voi bo loc Median-of-5 chong nhieu xung dong co
+    int frame_min_raw = 4095;
+    int frame_max_raw = 0;
     for (int i = 0; i < 4; i++) {
-        sData.raw_ir[i] = readIRFiltered(PIN_IR[i]);
+        int raw = readIRFiltered(PIN_IR[i]);
+        sData.raw_ir[i] = raw;
+        if (raw < frame_min_raw) frame_min_raw = raw;
+        if (raw > frame_max_raw) frame_max_raw = raw;
     }
 
-    // 2. Chuan hoa tin hieu bang thuat toan Vi Sai Khong Gian (khang sut ap pin)
-    sensorNorm.processFrame(sData);
+    int frame_span = frame_max_raw - frame_min_raw;
+    bool valid_contrast = (frame_span > 500) && (frame_min_raw < 1300) && (frame_max_raw < 3950);
+    bool slow_tick      = ((loopFrameCount & 0x1F) == 0);
 
-    // 3. Tinh toan luat dieu khien & xuat xung PWM an toan
+    for (int i = 0; i < 4; i++) {
+        int raw = sData.raw_ir[i];
+
+        if (valid_contrast && brain.off_track_time < 0.04) {
+            if (raw > 20 && raw < ir_white_cal[i]) {
+                ir_white_cal[i] = (ir_white_cal[i] * 3 + raw) / 4;
+            } else if (slow_tick && raw < ir_white_cal[i] + 250 && ir_white_cal[i] < 1100) {
+                ir_white_cal[i] += 1;
+            }
+
+            if (raw > ir_white_cal[i] + 600 && raw < 3850) {
+                if (raw > ir_black_cal[i]) {
+                    ir_black_cal[i] = (ir_black_cal[i] * 3 + raw) / 4;
+                }
+            }
+        }
+
+        int min_valid_black = ir_white_cal[i] + 650;
+        if (slow_tick && ir_black_cal[i] > min_valid_black + 250) {
+            ir_black_cal[i] -= 3;
+        }
+        if (ir_black_cal[i] < min_valid_black) {
+            ir_black_cal[i] = min_valid_black;
+        }
+
+        int effective_span = ((ir_black_cal[i] - ir_white_cal[i]) * 88) / 100;
+        if (effective_span < 500) effective_span = 500;
+
+        float norm = (float)(raw - ir_white_cal[i]) / (float)effective_span;
+        sData.ir[i] = clampf(norm, 0.0f, 1.0f);
+    }
+
     int pwm_l = 0, pwm_r = 0;
     brain.computeControl(sData, dt, pwm_l, pwm_r);
     setMotorHardware(pwm_l, pwm_r);
@@ -932,9 +854,9 @@ void loop() {
     unsigned long nowMs = millis();
     if (nowMs - lastTelemetryMillis >= 120 && Serial.availableForWrite() > 64) {
         lastTelemetryMillis = nowMs;
-        Serial.printf("[t=%5.2fs] St=%d Err=%+5.2f dE=%+6.1f | Span=%4d | IR=[%.2f,%.2f,%.2f,%.2f] | PWM=(%+4d,%+4d)\n",
-                      sData.elapsed_sec, (int)brain.state, brain.filtered_error, brain.filtered_deriv,
-                      sData.contrast_span,
+        Serial.printf("[t=%5.2fs] Err=%+5.2f dE=%+6.1f | Raw=[%4d,%4d,%4d,%4d] | IR=[%.2f,%.2f,%.2f,%.2f] | PWM=(%+4d,%+4d)\n",
+                      sData.elapsed_sec, brain.filtered_error, brain.filtered_deriv,
+                      sData.raw_ir[0], sData.raw_ir[1], sData.raw_ir[2], sData.raw_ir[3],
                       sData.ir[0], sData.ir[1], sData.ir[2], sData.ir[3],
                       pwm_l, pwm_r);
     }
