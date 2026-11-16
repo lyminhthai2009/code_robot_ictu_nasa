@@ -1,6 +1,7 @@
 // ============================================================================
-//  COBOT LINE FOLLOWER v4 (SLOW + STOP 5S AT EVERY CROSS) - ESP32-C3 - 500 Hz
-//  v4 = v3 + "ngã tư mọi góc" + Chạy chậm + Dừng 5s ở mọi ngã tư
+//  COBOT LINE FOLLOWER v4 (SLOW + 100% CROSS DETECT + STOP 5S) - ESP32-C3
+//  - Đã fix lỗi bộ lọc làm mất ngã tư khi đi tốc độ chậm
+//  - Sáng đèn LED trắng (chân 20) trong suốt 5 giây dừng tại ngã tư
 // ============================================================================
 #include <Arduino.h>
 #include <math.h>
@@ -13,46 +14,46 @@
 // ============================================================================
 // 1. CẤU HÌNH CHIẾN THUẬT
 // ============================================================================
-#define ENABLE_SHORTCUT          1   // 1 = rẽ tắt theo CROSS_PLAN sau khi dừng 5s | 0 = luôn đi thẳng sau khi dừng 5s
+#define ENABLE_SHORTCUT          1   // 1 = rẽ theo CROSS_PLAN sau khi dừng 5s | 0 = luôn đi thẳng sau khi dừng 5s
 #define ENABLE_SERIAL_TELEMETRY  0   // 1 = in log 8 Hz (chỉ để debug, tắt khi thi)
-#define ENABLE_BLACKBOX          0   // 1 = ghi dữ liệu vào RAM, xả qua USB khi nhấc xe (để chỉnh thông số)
+#define ENABLE_BLACKBOX          0   // 1 = ghi dữ liệu vào RAM, xả qua USB khi nhấc xe
 
 // Thời gian dừng tại mỗi ngã tư (giây)
 static const float CROSS_STOP_TIME_S = 5.0f;  // Dừng đủ 5 giây ở mọi ngã tư rồi mới đi tiếp
 
 // Hành động ở từng lần gặp ngã tư (theo thứ tự gặp) sau khi đã dừng 5s:
-//   0 = đi thẳng,  +1 = rẽ về phía S4 (rẽ phải),  -1 = rẽ về phía S1 (rẽ trái)
-#define TURN_RIGHT  (+1)   // về phía S4
-#define TURN_LEFT   (-1)   // về phía S1
+//   0 = đi thẳng,  +1 = rẽ phải (về phía S4),  -1 = rẽ trái (về phía S1)
+#define TURN_RIGHT  (+1)
+#define TURN_LEFT   (-1)
 static const int8_t CROSS_PLAN[] = { 0, 0, TURN_RIGHT };   // lần 1: thẳng | lần 2: thẳng | lần 3: rẽ phải
 static const int    CROSS_PLAN_LEN = (int)(sizeof(CROSS_PLAN) / sizeof(CROSS_PLAN[0]));
 
 // ---------------------------- Hình học xe (mm) -----------------------------
 static const float SENSOR_X_MM[4]       = { -20.0f, -11.25f, 11.25f, 20.0f };
 static const float AXLE_TO_OUTER_ROW_MM = 57.0f;   // trục bánh -> hàng S1/S4
-static const float ASSUMED_LINE_W_MM    = 30.0f;   // bề rộng vạch giả định (chỉ dùng để canh tâm ngã tư)
+static const float ASSUMED_LINE_W_MM    = 30.0f;   // bề rộng vạch giả định
 static const float SPEED_MMPS_AT_255    = 500.0f;  // tốc độ thật (mm/s) khi PWM=255 trên sàn
 
 // ---------------------------- Tốc độ (ĐÃ CHỈNH RẤT CHẬM) -------------------
-static const float V_MAX         = 80.0f;    // [CHẬM] tốc độ nền tối đa trên đường thẳng (gốc: 250)
-static const float V_CORNER_MIN  = 55.0f;    // [CHẬM] sàn tốc độ nền khi vào cua (gốc: 150)
-static const float V_START       = 45.0f;    // [CHẬM] tốc độ khởi động (gốc: 70)
-static const float V_SEEK_LINE   = 55.0f;    // [CHẬM] đi chậm khi chưa thấy vạch (gốc: 100)
-static const float ACC_UP        = 300.0f;   // PWM/s, tăng tốc êm nhẹ
+static const float V_MAX         = 80.0f;    // tốc độ nền tối đa trên đường thẳng
+static const float V_CORNER_MIN  = 55.0f;    // sàn tốc độ nền khi vào cua
+static const float V_START       = 45.0f;    // tốc độ khởi động
+static const float V_SEEK_LINE   = 55.0f;    // đi chậm khi chưa thấy vạch
+static const float ACC_UP        = 300.0f;   // PWM/s, tăng tốc êm
 static const float ACC_DN        = 3000.0f;  // PWM/s, giảm tốc
-static const float K_SPD_U       = 0.35f;    // giảm tốc theo nỗ lực lái (độ cong)
+static const float K_SPD_U       = 0.35f;    // giảm tốc theo nỗ lực lái
 static const float K_SPD_E       = 0.80f;    // giảm tốc theo sai số
 static const float E_SPD_DEAD_MM = 6.0f;
-static const float F_IN_MIN      = 0.0f;     // cho phép bánh trong giảm về 0 khi chạy chậm để dễ bẻ lái
+static const float F_IN_MIN      = 0.0f;     // cho phép bánh trong giảm về 0 khi chạy chậm
 
-// ---------------------------- PID (đơn vị mm - êm cho tốc độ chậm) ---------
-static const float KP          = 4.5f;       // PWM / mm (giảm nhẹ từ 7.0 để không giật khi đi chậm)
+// ---------------------------- PID (đơn vị mm) ------------------------------
+static const float KP          = 4.5f;       // PWM / mm
 static const float KD          = 0.18f;      // PWM*s / mm
 static const float KI          = 25.0f;      // PWM / (mm*s)
 static const float I_MAX       = 40.0f;
 static const float I_LEAK_TAU  = 0.9f;       // s
-static const float I_ACTIVE_MM = 15.0f;      // chỉ tích phân khi |e| < giá trị này
-static const float KP_NL_MM    = 40.0f;      // Kp_eff = Kp * (1 + |e| / KP_NL_MM)
+static const float I_ACTIVE_MM = 15.0f;
+static const float KP_NL_MM    = 40.0f;
 
 // ---------------------------- Bộ lọc vị trí alpha-beta ---------------------
 static const float AB_ALPHA = 0.40f;
@@ -65,42 +66,43 @@ static const float WSUM_MIN  = 0.08f;
 static const float K_EXT_MM  = 9.0f;
 static const float X_LIM_MM  = 30.0f;
 
-// ---------------------------- Mất vạch (tương thích tốc độ chậm) -----------
+// ---------------------------- Mất vạch -------------------------------------
 static const float GAP_X_MM       = 10.0f;
 static const float GAP_HOLD_MM    = 50.0f;
-static const float V_GAP_MAX      = 75.0f;    // [CHẬM] (gốc: 230)
-static const float V_LOST         = 60.0f;    // [CHẬM] (gốc: 140)
-static const float U_LOST_MAX     = 70.0f;    // [CHẬM] (gốc: 120)
+static const float V_GAP_MAX      = 75.0f;
+static const float V_LOST         = 60.0f;
+static const float U_LOST_MAX     = 70.0f;
 static const float LOST_RAMP_S    = 0.15f;
-static const float LOST_GIVEUP_S  = 3.0f;     // tăng thời gian tìm vạch vì xe đi chậm
+static const float LOST_GIVEUP_S  = 3.0f;
 
-// ---------------------------- Ngã tư [V4] ----------------------------------
-static const float WING_ON               = 0.50f;   // cánh > ngưỡng này = đang nằm trên vạch ngang
-static const float WING_OFF              = 0.35f;   // cánh < ngưỡng này = đã rời vạch ngang (có trễ)
-static const float WING_BASE_MAX         = 0.30f;   // nền cánh phải < giá trị này mới tính là cạnh lên (loại cua gắt)
-static const float WING_SEP_ON           = 0.80f;   // 2 cảm biến cách nhau >= 31 mm cùng > ngưỡng này = có 2 vạch riêng biệt
-static const int   WING_DEBOUNCE_TICKS   = 3;       // cánh đen liên tục >= 3 tick (6 ms) mới tính
-static const float WING_LATCH_MM         = 50.0f;   // hai cánh chạm vạch ngang cách nhau tối đa bấy nhiêu mm xe tiến
-static const float CROSS_MIN_SPACING_MM  = 180.0f;  // hai ngã tư liên tiếp phải cách nhau >= quãng này (odometer)
-static const float CROSS_PASS_MAX_MM     = 200.0f;  // chốt chặn khi đi thẳng qua ngã tư
-static const float CROSS_PASS_MAX_S      = 2.50f;   // tăng thời gian tối đa qua ngã tư vì xe đi chậm
-static const float CROSS_EXIT_MARGIN_MM  = 15.0f;   // đi thêm quãng này sau khi cánh cuối rời vạch ngang
-static const float U_REF_TAU             = 0.20f;   // s: lái "sạch" để giữ hướng qua ngã tư
+// ---------------------------- Ngã tư [ĐÃ FIX NHẠY CHO TỐC ĐỘ CHẬM] ---------
+static const float WING_ON               = 0.38f;   // [FIX] hạ từ 0.50 -> 0.38 để bắt nhạy hơn
+static const float WING_OFF              = 0.25f;   // [FIX] cánh < 0.25 = đã rời vạch ngang
+static const float WING_BASE_MAX         = 0.55f;   // [FIX] nâng từ 0.30 -> 0.55 để đi chậm không bị khóa
+static const float WING_SEP_ON           = 0.45f;   // [FIX] hạ từ 0.80 -> 0.45 để mắt ngoài hơi yếu vẫn bắt tốt
+static const int   WING_DEBOUNCE_TICKS   = 2;       // [FIX] 2 tick (4 ms)
+static const float WING_LATCH_MM         = 60.0f;   // cửa sổ chờ 2 cánh chạm vạch ngang (ngã tư xiên)
+static const float CROSS_MIN_SPACING_MM  = 70.0f;   // [FIX] giảm quãng đường khóa để nhận được các ngã tư gần nhau
+static const float CROSS_COOLDOWN_S      = 0.40f;   // [MỚI] thời gian nghỉ tối thiểu sau khi thoát hẳn ngã tư cũ
+static const float CROSS_PASS_MAX_MM     = 200.0f;
+static const float CROSS_PASS_MAX_S      = 2.50f;
+static const float CROSS_EXIT_MARGIN_MM  = 15.0f;
+static const float U_REF_TAU             = 0.20f;
 
-// ---------------------------- Rẽ tắt (pivot) [V4 - CHẬM] -------------------
-static const float V_ALIGN           = 65.0f;   // [CHẬM] tốc độ tiến vào tâm ngã tư (gốc: 150)
+// ---------------------------- Rẽ tắt (pivot) -------------------------------
+static const float V_ALIGN           = 65.0f;
 static const float ALIGN_FALLBACK_MM = 200.0f;
-static const float ALIGN_FALLBACK_S  = 2.50f;   // tăng timeout do xe chạy chậm
-static const float P_CLEAR           = 75.0f;   // [CHẬM] pivot thoát vạch cũ (gốc: 140)
-static const float P_SEEK            = 60.0f;   // [CHẬM] pivot dò nhánh mới (gốc: 100)
-static const float PIVOT_OLD_ON      = 0.50f;
+static const float ALIGN_FALLBACK_S  = 2.50f;
+static const float P_CLEAR           = 75.0f;
+static const float P_SEEK            = 60.0f;
+static const float PIVOT_OLD_ON      = 0.45f;
 static const float PIVOT_OLD_GONE    = 0.25f;
-static const float PIVOT_NEW_OUTER   = 0.50f;
+static const float PIVOT_NEW_OUTER   = 0.45f;
 static const float PIVOT_RELAX_T     = 0.55f;
-static const float T_PIVOT_MAX       = 2.20f;   // tăng thời gian quay tối đa do quay chậm
+static const float T_PIVOT_MAX       = 2.20f;
 static const float PIVOT_SWEEP_MMPS  = 150.0f;
 static const float HANDOVER_T        = 0.35f;
-static const float V_HANDOVER        = 55.0f;   // [CHẬM] (gốc: 80)
+static const float V_HANDOVER        = 55.0f;
 static const float F_IN_HANDOVER     = -30.0f;
 static const float U_MAX_HANDOVER    = 65.0f;
 
@@ -183,10 +185,10 @@ class Brain {
 public:
     enum Mode : uint8_t {
         M_RUN = 0,
-        M_CROSS_WAIT,      // [MỚI] Dừng 5 giây tại ngã tư
-        M_CROSS_PASS,      // đi thẳng qua ngã tư: đóng băng lái
-        M_TURN_ALIGN,      // rẽ tắt: tiến thẳng tới khi trục bánh trùng tâm ngã tư
-        M_TURN_PIVOT       // pivot tại chỗ: quay tới khi bắt được nhánh mới
+        M_CROSS_WAIT,      // Dừng 5 giây tại ngã tư
+        M_CROSS_PASS,      // Đi thẳng qua ngã tư
+        M_TURN_ALIGN,      // Tiến vào tâm ngã tư để chuẩn bị rẽ
+        M_TURN_PIVOT       // Xoay tại chỗ bắt nhánh mới
     };
 
     Mode  mode;
@@ -202,11 +204,11 @@ public:
     float lost_t, lost_d, lost_x;
     int   lost_side;
     float handover_t;
+    float cross_cooldown_t; // Đếm ngược thời gian nghỉ sau khi qua ngã tư
 
     bool  was_lifted, has_seen_line;
     float off_track_t, run_t;
 
-    // [V4] theo dõi hai cánh S1 (k=0) và S4 (k=1)
     bool  base_init;
     float base_o[2];
     bool  w_on[2], w_rose[2], w_fell[2], w_sep;
@@ -219,7 +221,7 @@ public:
     float last_cross_dist;
     int   clear_ticks, white_ticks;
     int   turn_dir;
-    int   pending_cross_act; // [MỚI] Lưu hành động sẽ làm sau khi dừng đủ 5 giây
+    int   pending_cross_act;
     bool  pivot_old_seen;
 
     bool  ev_cross; int ev_idx, ev_act; float ev_center_d;
@@ -236,6 +238,7 @@ public:
         in_loss = false; meas_ok = false;
         lost_t = 0.0f; lost_d = 0.0f; lost_x = 0.0f; lost_side = 1;
         handover_t = 0.0f;
+        cross_cooldown_t = 0.0f;
         was_lifted = false; has_seen_line = false;
         off_track_t = 0.0f; run_t = 0.0f;
         base_init = false; base_o[0] = base_o[1] = 0.0f;
@@ -257,16 +260,21 @@ public:
         const float* s = sd.ir;
 
         // ---- Nhấc xe / đặt xe ----
-        // Lưu ý: Không kích hoạt was_lifted khi đang xoay (M_TURN_PIVOT) hoặc đang dừng chờ 5s ở ngã tư (M_CROSS_WAIT)
         float max_ir = max4f(s[0], s[1], s[2], s[3]);
         float min_ir = min4f(s[0], s[1], s[2], s[3]);
         bool all_white = (max_ir < 0.10f);
         bool all_black = (min_ir > 0.88f);
-        bool ignore_lift = (mode == M_TURN_PIVOT || mode == M_CROSS_WAIT);
+        // Không coi là nhấc xe khi đang dừng chờ ở ngã tư, đang đi qua ngã tư, hoặc đang xoay
+        bool ignore_lift = (mode == M_TURN_PIVOT || mode == M_CROSS_WAIT || mode == M_CROSS_PASS || mode == M_TURN_ALIGN);
 
-        if ((all_white || all_black) && !ignore_lift) {
+        if (all_white && !ignore_lift) {
             off_track_t += dt;
             if (off_track_t > 0.85f) was_lifted = true;
+        } else if (all_black && !ignore_lift) {
+            // Lưu ý: nếu 4 mắt cùng đen trong lúc M_RUN thì đó chính là NGÃ TƯ chứ không phải nhấc xe!
+            // Chỉ khi 4 mắt đen liên tục > 2.5s mà không vào ngã tư mới coi là nhấc xe.
+            off_track_t += dt;
+            if (off_track_t > 2.50f) was_lifted = true;
         } else {
             if (was_lifted) {
                 if ((s[1] > 0.35f || s[2] > 0.35f) && min_ir < 0.45f) {
@@ -281,6 +289,7 @@ public:
         if (was_lifted) { stopOutputs(); return; }
 
         run_t += dt;
+        if (cross_cooldown_t > 0.0f) cross_cooldown_t -= dt;
         updateSpeedEstimate(dt);
 
         // ---- Chưa thấy vạch: đi thẳng chậm ----
@@ -318,7 +327,7 @@ private:
 
     void updateSpeedEstimate(float dt) {
         if (mode == M_CROSS_WAIT) {
-            v_est = 0.0f; // Đứng yên tại ngã tư thì vận tốc = 0, không cộng dồn quãng đường
+            v_est = 0.0f;
             return;
         }
         float c = 0.5f * (float)(prev_pl + prev_pr);
@@ -353,11 +362,13 @@ private:
         return true;
     }
 
+    // [FIX] Chỉ cập nhật nền khi cảm biến thực sự ở vùng trắng (< 0.20f)
+    // Tránh việc xe đi chậm làm base_o tăng theo cạnh vạch đen và tự khóa nhận diện ngã tư
     void updateWingBase(const float* s, float dt) {
-        if (!base_init) { base_o[0] = s[0]; base_o[1] = s[3]; base_init = true; }
-        const float ab = dt / (0.15f + dt);
-        base_o[0] += ((s[0] < 0.45f) ? ab : ab * 0.125f) * (s[0] - base_o[0]);
-        base_o[1] += ((s[3] < 0.45f) ? ab : ab * 0.125f) * (s[3] - base_o[1]);
+        if (!base_init) { base_o[0] = min2f(s[0], 0.15f); base_o[1] = min2f(s[3], 0.15f); base_init = true; }
+        const float ab = dt / (0.20f + dt);
+        if (s[0] < 0.20f) base_o[0] += ab * (s[0] - base_o[0]);
+        if (s[3] < 0.20f) base_o[1] += ab * (s[3] - base_o[1]);
     }
 
     void clearWings() {
@@ -390,21 +401,42 @@ private:
             }
         }
         if (w_rose[0] || w_rose[1] || w_ticks[0] > 0 || w_ticks[1] > 0) {
-            if ((s[0] > WING_SEP_ON && s[2] > WING_SEP_ON) || (s[1] > WING_SEP_ON && s[3] > WING_SEP_ON)) w_sep = true;
+            if ((s[0] > WING_SEP_ON && s[2] > WING_SEP_ON) ||
+                (s[1] > WING_SEP_ON && s[3] > WING_SEP_ON) ||
+                (s[0] > WING_ON && s[3] > WING_ON)) {
+                w_sep = true;
+            }
         } else {
             w_sep = false;
         }
         updateWingBase(s, dt);
     }
 
+    // [FIX] Nhận diện ngã tư kết hợp:
+    //   1. Trực tiếp: Cả 2 cánh ngoài (S1, S4) đều đen (> WING_ON) + ít nhất 1 mắt giữa đen (S2 hoặc S3 > 0.35)
+    //   2. Ngã tư xiên: 2 cánh chạm vạch lệch thời gian (w_rose[0] && w_rose[1] && w_sep && center)
     bool detectCross(const float* s, bool allowed) {
-        bool center = (s[1] > 0.45f || s[2] > 0.45f);
-        bool trig = allowed && w_rose[0] && w_rose[1] && w_sep && center;
-        cross_confirm = trig ? (cross_confirm + 1) : 0;
-        return cross_confirm >= 2;
+        if (!allowed) {
+            cross_confirm = 0;
+            return false;
+        }
+        bool center      = (s[1] > 0.35f || s[2] > 0.35f);
+        bool direct_both = (s[0] > WING_ON && s[3] > WING_ON && center);
+        bool skewed_both = (w_rose[0] && w_rose[1] && w_sep && center);
+
+        if (direct_both || skewed_both) {
+            cross_confirm++;
+        } else {
+            cross_confirm = 0;
+        }
+        return (cross_confirm >= 2);
     }
 
     void planCross() {
+        // Nếu bắt trực tiếp mà 1 cánh chưa kịp chốt w_rise_d thì gán bằng dist_mm hiện tại
+        if (!w_rose[0]) w_rise_d[0] = dist_mm;
+        if (!w_rose[1]) w_rise_d[1] = dist_mm;
+
         float span = SENSOR_X_MM[3] - SENSOR_X_MM[0];
         float t = fabsf(w_rise_d[1] - w_rise_d[0]) / span;
         t = min2f(t, 3.0f);
@@ -425,7 +457,6 @@ private:
         }
     }
 
-    // Khi gặp ngã tư: Luôn vào chế độ M_CROSS_WAIT để dừng đủ 5 giây trước
     void enterCross() {
         int idx = cross_count;
         cross_count++;
@@ -442,11 +473,11 @@ private:
         planCross();
         ev_cross = true; ev_idx = idx + 1; ev_act = act; ev_center_d = center_odo;
 
-        // Chuyển sang dừng 5s ở mọi ngã tư
+        // Vào trạng thái dừng 5 giây ở mọi ngã tư
         mode = M_CROSS_WAIT;
     }
 
-    // ---- [MỚI] Dừng 5 giây tại ngã tư ----
+    // ---- Dừng 5 giây tại ngã tư ----
     void outCrossWait(const float* s, float dt, float& vl, float& vr) {
         (void)s;
         mode_t += dt;
@@ -456,10 +487,10 @@ private:
         v_est = 0.0f;
         u_cmd = 0.0f;
 
-        // Đứng yên đủ 5 giây (CROSS_STOP_TIME_S) rồi mới đi tiếp
         if (mode_t >= CROSS_STOP_TIME_S) {
             mode_t = 0.0f;
             mode_d = 0.0f;
+            clear_ticks = 0;
             v_cmd  = V_START;
             if (pending_cross_act == 0) {
                 mode = M_CROSS_PASS;
@@ -472,8 +503,8 @@ private:
 
     // ---- RUN: cập nhật bộ lọc, mất vạch, ngã tư ----
     void runEstimate(const float* s, float dt) {
-        bool allowed = (handover_t <= 0.0f) && !in_loss && (run_t > 0.15f) &&
-                       ((dist_mm - last_cross_dist) >= CROSS_MIN_SPACING_MM);
+        bool allowed = (handover_t <= 0.0f) && (cross_cooldown_t <= 0.0f) && !in_loss &&
+                       (run_t > 0.20f) && ((dist_mm - last_cross_dist) >= CROSS_MIN_SPACING_MM);
         if (allowed) trackWings(s, dt);
         else { clearWings(); updateWingBase(s, dt); }
         bool crossing = detectCross(s, allowed);
@@ -567,22 +598,30 @@ private:
     }
 
     // ---- Đi thẳng qua ngã tư (sau khi đã dừng 5s) ----
+    // Đảm bảo xe tiến qua hẳn vạch ngang (2 cánh S1, S4 trở về nền trắng) rồi mới quay lại M_RUN
     void outCrossPass(const float* s, float dt, float& vl, float& vr) {
         mode_t += dt;
         mode_d += v_est * dt;
         trackWings(s, dt);
-        rampSpeed(V_MAX, dt); // Tăng tốc êm trở lại sau khi dừng 5s
-        u_hold -= u_hold * (dt / 0.10f);
-        bool clear = w_fell[0] && w_fell[1] && (s[0] < 0.30f && s[3] < 0.30f);
-        clear_ticks = clear ? (clear_ticks + 1) : 0;
+        rampSpeed(V_MAX, dt);
+        u_hold -= u_hold * (dt / 0.15f);
+
+        bool wings_white = (s[0] < WING_OFF && s[3] < WING_OFF);
+        if (mode_t > 0.18f && wings_white) {
+            clear_ticks++;
+        } else {
+            clear_ticks = 0;
+        }
+
         mixWheels(v_cmd, u_hold, F_IN_MIN, vl, vr);
         u_cmd = u_hold;
-        if ((clear_ticks >= 3 && mode_d > 15.0f) || dist_mm >= end_odo ||
-            mode_d > CROSS_PASS_MAX_MM || mode_t > CROSS_PASS_MAX_S) {
+
+        if (clear_ticks >= 6 || mode_d > CROSS_PASS_MAX_MM || mode_t > CROSS_PASS_MAX_S) {
             mode = M_RUN;
             need_reinit = true;
             in_loss = false; lost_t = 0.0f; lost_d = 0.0f;
             last_cross_dist = dist_mm;
+            cross_cooldown_t = CROSS_COOLDOWN_S;
             clearWings();
         }
     }
@@ -594,7 +633,7 @@ private:
         trackWings(s, dt);
         refineCenter();
         rampSpeed(V_ALIGN, dt);
-        u_hold -= u_hold * (dt / 0.10f);
+        u_hold -= u_hold * (dt / 0.15f);
         mixWheels(v_cmd, u_hold, F_IN_MIN, vl, vr);
         u_cmd = u_hold;
         ev_center_d = center_odo;
@@ -628,6 +667,7 @@ private:
             in_loss = false; lost_t = 0.0f; lost_d = 0.0f;
             handover_t = HANDOVER_T; v_cmd = V_HANDOVER;
             last_side = turn_dir; last_cross_dist = dist_mm;
+            cross_cooldown_t = CROSS_COOLDOWN_S;
             clearWings();
             mode = M_RUN; mode_t = 0.0f;
             return;
@@ -637,6 +677,7 @@ private:
             in_loss = false; lost_t = 0.0f; lost_d = 0.0f;
             integ = 0.0f; handover_t = 0.0f; v_cmd = V_LOST;
             last_side = turn_dir; last_cross_dist = dist_mm;
+            cross_cooldown_t = CROSS_COOLDOWN_S;
             clearWings();
             mode = M_RUN; mode_t = 0.0f;
         }
@@ -712,6 +753,17 @@ static inline int slewAxis(int target, int prev, int& hold) {
 }
 
 void setMotorHardware(int pwm_l, int pwm_r) {
+    // Khi đang ở chế độ dừng 5 giây tại ngã tư: phanh đứng im ngay lập tức!
+    if (brain.mode == Brain::M_CROSS_WAIT) {
+        prev_hw_pwm_l = 0;
+        prev_hw_pwm_r = 0;
+        zero_cross_hold_l = 0;
+        zero_cross_hold_r = 0;
+        writeLEDC(CH_L_A, 0); writeLEDC(CH_L_B, 0);
+        writeLEDC(CH_R_A, 0); writeLEDC(CH_R_B, 0);
+        return;
+    }
+
     if (SWAP_MOTORS_LR) { int tmp = pwm_l; pwm_l = pwm_r; pwm_r = tmp; }
     if (INVERT_LEFT_MOTOR)  pwm_l = -pwm_l;
     if (INVERT_RIGHT_MOTOR) pwm_r = -pwm_r;
@@ -924,6 +976,9 @@ void loop() {
     int pwm_l = 0, pwm_r = 0;
     brain.step(sData, dt, pwm_l, pwm_r);
     setMotorHardware(pwm_l, pwm_r);
+
+    // Bật đèn LED trắng (chân 20) khi xe đang dừng 5 giây ở ngã tư để báo hiệu
+    digitalWrite(W_LED_ON, (brain.mode == Brain::M_CROSS_WAIT) ? HIGH : LOW);
 
 #if ENABLE_BLACKBOX
     if ((loopFrameCount % 10) == 0 && !brain.was_lifted) bbRecord(sData, pwm_l, pwm_r);
