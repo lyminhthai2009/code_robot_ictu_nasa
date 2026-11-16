@@ -1,15 +1,12 @@
 // ============================================================================
-//  COBOT LINE FOLLOWER v4.1 - ESP32-C3 - vòng lặp 500 Hz
-//  v4.1 = v4 (ngã tư mọi góc bằng odometer) + Nâng cấp độ bám & độ mượt:
-//    - Bộ lọc Alpha-Beta tối ưu ở 500 Hz + lọc thông thấp vận tốc ngang vx_f
-//    - KP phi tuyến bậc 2 (êm ở tâm vạch, lực kéo mạnh dần ở rìa vạch)
-//    - KD bất đối xứng (tăng lực bẻ khi trôi khỏi vạch, đỡ êm khi về tâm)
-//    - Xả nhanh tích phân (Clegg-style bleed) khi đảo dấu qua tâm (chống văng cua S)
-//    - Sàn bánh trong biến thiên mượt (Fast-Attack / Smooth-Release risk filter)
-//    - Khởi tạo vận tốc quét khi bắt lại vạch + lọc mượt đầu ra lái u_out_f
-//  Tốc độ nền V_MAX / V_CORNER_MIN GIỮ NGUYÊN.
-//  Đơn vị: sai số vị trí = mm (dương = vạch lệch về phía S4), PWM = 0..255
-//  Quy ước lái (giữ nguyên code gốc): u > 0 -> bánh trái nhanh hơn -> xe quay về phía S4
+//  COBOT LINE FOLLOWER v5 - ESP32-C3 - vòng lặp 500 Hz
+//  v5 = v4 + Nâng cấp toàn diện "Bám cua gắt - Siêu mượt - Thích ứng đa màu nền":
+//    1) [V5-MEAS]  Xóa điểm mù đạo hàm ở cảm biến rìa S1/S4 (Shoulder + Edge continuity)
+//    2) [V5-BRAKE] Phanh đón đầu trước cua theo dự báo vị trí (x_pred) & tốc độ lệch (div_rate)
+//    3) [V5-PID]   PD bất đối xứng theo pha (Vào cua gắt vs Trả lái êm) + Lọc đạo hàm 6ms
+//    4) [V5-FLOOR] Sàn bánh trong 2 tầng: êm ở cua thường (>=0), phanh ngược chủ động ở cua gắt (-38)
+//    5) [V5-SURF]  Thích ứng màu nền 2 lớp: Khử nền đồng pha tức thì (2ms) + Hiệu chuẩn liên kết 4 mắt
+//  Giữ nguyên toàn bộ chân phần cứng, tốc độ V_MAX / V_CORNER_MIN và chiến thuật ngã tư [V4].
 // ============================================================================
 #include <Arduino.h>
 #include <math.h>
@@ -27,8 +24,7 @@
 #define ENABLE_BLACKBOX          0   // 1 = ghi dữ liệu vào RAM, xả qua USB khi nhấc xe (để chỉnh thông số)
 
 // Hành động ở từng lần gặp ngã tư (theo thứ tự gặp):
-//   0 = đi thẳng,  +1 = rẽ về phía S4 (phía sai số dương, như pivot 235/-135 của code gốc),  -1 = rẽ về phía S1
-// Sa hình vòng bảng: ngã tư 1 đi thẳng 2 lần (lần vào, lần ra), ngã tư 2 lần đầu rẽ tắt.
+//   0 = đi thẳng,  +1 = rẽ về phía S4 (phía sai số dương),  -1 = rẽ về phía S1
 #define TURN_RIGHT  (+1)   // về phía S4
 #define TURN_LEFT   (-1)   // về phía S1
 static const int8_t CROSS_PLAN[] = { 0, 0, TURN_RIGHT };   // lần 1: thẳng | lần 2: thẳng | lần 3: rẽ phải
@@ -37,63 +33,65 @@ static const int    CROSS_PLAN_LEN = (int)(sizeof(CROSS_PLAN) / sizeof(CROSS_PLA
 // ---------------------------- Hình học xe (mm) -----------------------------
 static const float SENSOR_X_MM[4]       = { -20.0f, -11.25f, 11.25f, 20.0f };
 static const float AXLE_TO_OUTER_ROW_MM = 57.0f;   // trục bánh -> hàng S1/S4
-static const float ASSUMED_LINE_W_MM    = 30.0f;   // bề rộng vạch giả định (chỉ dùng để canh tâm ngã tư)
-static const float SPEED_MMPS_AT_255    = 500.0f;  // !!! ĐO LẠI: tốc độ thật (mm/s) khi PWM=255 trên sàn
+static const float ASSUMED_LINE_W_MM    = 30.0f;   // bề rộng vạch giả định (dùng để canh tâm ngã tư)
+static const float SPEED_MMPS_AT_255    = 500.0f;  // tốc độ thật (mm/s) khi PWM=255 trên sàn
 
-// ---------------------------- Tốc độ ---------------------------------------
+// ---------------------------- Tốc độ (GIỮ NGUYÊN NỀN) ----------------------
 static const float V_MAX         = 250.0f;   // tốc độ nền tối đa trên đường thẳng
 static const float V_CORNER_MIN  = 150.0f;   // sàn tốc độ nền khi vào cua
 static const float V_START       = 70.0f;    // tốc độ khởi động
 static const float V_SEEK_LINE   = 100.0f;   // đi chậm khi chưa thấy vạch
-static const float ACC_UP        = 650.0f;   // PWM/s, tăng tốc mượt
-static const float ACC_DN        = 4500.0f;  // PWM/s, giảm tốc nhanh khi thấy cua
-static const float K_SPD_U       = 0.82f;    // giảm tốc theo nỗ lực lái (độ cong)
-static const float K_SPD_E       = 2.20f;    // giảm tốc sớm theo sai số dự báo
-static const float E_SPD_DEAD_MM = 5.5f;
-static const float F_IN_MIN      = 30.0f;    // sàn bánh trong khi chạy thẳng / cua nhẹ
+static const float ACC_UP        = 650.0f;   // PWM/s, tăng tốc mượt (chống giật & sụt áp pin)
+static const float ACC_DN        = 6500.0f;  // PWM/s, giảm tốc cực nhanh ngay khi phát hiện chớm vào cua
+static const float K_SPD_U       = 0.85f;    // giảm tốc theo nỗ lực lái
+static const float K_SPD_E       = 2.6f;     // giảm tốc theo sai số vị trí thực + dự báo
+static const float K_SPD_VX      = 0.22f;    // [V5] giảm tốc sớm theo tốc độ vạch lao ra mép (mm/s)
+static const float E_SPD_DEAD_MM = 4.5f;     // vùng chết sai số trên đường thẳng
+static const float VX_SPD_DEAD   = 55.0f;    // mm/s: ngưỡng tốc độ lệch bắt đầu phanh đón đầu
+static const float F_IN_MIN      = 30.0f;    // sàn bánh trong khi đi thẳng / cua nhẹ
 
-// ---------------------------- PID (đơn vị mm) [V4.1] -----------------------
-static const float KP            = 6.6f;     // PWM / mm (nhẹ hơn ở tâm để chạy thẳng cực êm)
-static const float KP_NL_MM      = 45.0f;    // thành phần bậc 1: |e| / KP_NL_MM
-static const float KP_QUAD       = 0.0012f;  // thành phần bậc 2: KP_QUAD * e^2 (ghì cực chắc khi |e| > 12mm)
-static const float KD            = 0.30f;    // PWM*s / mm (đi cùng vx_f đã lọc sạch nhiễu)
-static const float KD_AWAY_BOOST = 0.28f;    // tăng thêm 28% KD khi xe đang trôi ra xa tâm vạch
-static const float KI            = 48.0f;    // PWM / (mm*s)
-static const float I_MAX         = 65.0f;
-static const float I_LEAK_TAU    = 0.90f;    // s: xả chậm khi đang giữ cua cùng phía
-static const float I_CROSS_TAU   = 0.12f;    // s: xả nhanh gấp 7.5 lần khi vạch đổi bên (chống văng cua S)
-static const float I_ACTIVE_MM   = 22.0f;    // cửa sổ tích phân rộng hơn, giảm dần mượt ở rìa
-static const float TAU_U_OUT     = 0.0038f;  // s: lọc mượt tín hiệu lái đầu ra (~2 tick)
+// ---------------------------- PID Bất đối xứng (đơn vị mm) -----------------
+static const float KP            = 7.6f;     // PWM / mm (lực giữ tâm cơ sở)
+static const float KP_NL_MM      = 32.0f;    // Kp_eff tăng nhanh khi lệch lớn để bẻ mũi xe sớm
+static const float KD_OUT        = 0.34f;    // [V5] PWM*s/mm khi vạch đang RỜI TÂM (vào cua: cần bẻ sớm)
+static const float KD_IN         = 0.42f;    // [V5] PWM*s/mm khi vạch đang VỀ TÂM (trả lái: chống vọt lố, siêu mượt)
+static const float VX_FILTER_TAU = 0.006f;   // [V5] s (6ms) lọc nhiễu lượng tử trên đạo hàm vx
+static const float KI            = 52.0f;    // PWM / (mm*s) bù độ cong khi ôm cua dài
+static const float I_MAX         = 75.0f;    // trần tích phân độ cong
+static const float I_LEAK_TAU    = 0.85f;    // s: xả dần khi đi thẳng
+static const float I_ACTIVE_MM   = 28.0f;    // [V5] tích phân trên toàn dải cảm biến để giữ lực ôm cua
 
-// ---------------------------- Bộ lọc vị trí alpha-beta [V4.1] --------------
-static const float AB_ALPHA = 0.28f;         // Tối ưu tới hạn ở 500 Hz (giảm một nửa nhiễu lượng tử)
-static const float AB_BETA  = 0.042f;
-static const float TAU_VX_F = 0.006f;        // s: hằng số thời gian lọc thông thấp vận tốc ngang vx_f
-static const float JUMP_MM  = 25.0f;
+// ---------------------------- Bộ lọc vị trí alpha-beta ---------------------
+static const float AB_ALPHA = 0.44f;         // bám vị trí nhạy hơn ở đầu cua
+static const float AB_BETA  = 0.095f;        // bắt vận tốc ngang vx nhanh hơn
+static const float JUMP_MM  = 26.0f;
 
-// ---------------------------- Ước lượng vị trí -----------------------------
-static const float W_FLOOR   = 0.08f;
-static const float WSUM_MIN  = 0.08f;
-static const float K_EXT_MM  = 10.5f;        // Mở rộng dải ngoại suy rìa mượt hơn (9.0 -> 10.5 mm)
-static const float X_LIM_MM  = 31.0f;
+// ---------------------------- Ước lượng vị trí liên tục [V5] ---------------
+static const float W_FLOOR       = 0.07f;
+static const float WSUM_MIN      = 0.08f;
+static const float K_SHOULDER_MM = 3.8f;     // [V5] bù độ dốc khi vạch lướt từ S2/S3 sang S1/S4 (xóa điểm mù 16..21mm)
+static const float K_EXT_MM      = 9.5f;     // ngoại suy khi vạch trượt ra mép ngoài S1/S4
+static const float X_LIM_MM      = 32.0f;
 
-// ---------------------------- Mất vạch -------------------------------------
+// ---------------------------- Mất vạch & Bắt lại vạch ----------------------
 static const float GAP_X_MM       = 10.0f;
 static const float GAP_HOLD_MM    = 50.0f;
 static const float V_GAP_MAX      = 230.0f;
-static const float V_LOST         = 140.0f;
-static const float U_LOST_MAX     = 128.0f;  // Lực bẻ tối đa khi cứu vạch
-static const float LOST_RAMP_S    = 0.10f;
+static const float V_LOST         = 125.0f;  // giảm tốc khi mất vạch ở cua gắt để quay nhanh hơn
+static const float U_LOST_MAX     = 140.0f;  // lực bẻ tối đa khi tìm lại vạch
+static const float LOST_RAMP_S    = 0.08f;   // [V5] tăng lực tìm vạch nhanh hơn (80ms)
 static const float LOST_GIVEUP_S  = 1.2f;
+static const float REENTRY_T      = 0.09f;   // [V5] cửa sổ giảm chấn êm khi vừa bắt lại vạch (90ms)
 
-// ---------------------------- Ngã tư [V4] ----------------------------------
-static const float WING_ON               = 0.50f;
-static const float WING_OFF              = 0.35f;
-static const float WING_BASE_MAX         = 0.30f;
-static const float WING_SEP_ON           = 0.80f;
-static const int   WING_DEBOUNCE_TICKS   = 3;
-static const float WING_LATCH_MM         = 50.0f;
-static const float CROSS_MIN_SPACING_MM  = 250.0f;
+// ---------------------------- Ngã tư [V4 + V5 Adaptive] --------------------
+static const float WING_ON               = 0.50f;   // ngưỡng chuẩn khi nền = 0
+static const float WING_OFF              = 0.34f;   // ngưỡng rời vạch ngang
+static const float WING_BASE_MAX         = 0.38f;   // [V5] nới trần nền cánh để chịu được lúc đang chuyển màu sàn
+static const float WING_DELTA_ON         = 0.36f;   // [V5] cánh phải cao hơn nền thực tế của chính nó >= giá trị này
+static const float WING_SEP_ON           = 0.76f;   // 2 cảm biến cách nhau >= 31 mm cùng đen = 2 vạch riêng biệt
+static const int   WING_DEBOUNCE_TICKS   = 3;       // cánh đen liên tục >= 3 tick (6 ms) mới tính
+static const float WING_LATCH_MM         = 50.0f;   // hai cánh chạm vạch ngang cách nhau tối đa 50 mm
+static const float CROSS_MIN_SPACING_MM  = 250.0f;  // hai ngã tư liên tiếp cách nhau >= 250 mm
 static const float CROSS_PASS_MAX_MM     = 200.0f;
 static const float CROSS_PASS_MAX_S      = 0.80f;
 static const float CROSS_EXIT_MARGIN_MM  = 15.0f;
@@ -110,19 +108,20 @@ static const float PIVOT_OLD_GONE    = 0.25f;
 static const float PIVOT_NEW_OUTER   = 0.50f;
 static const float PIVOT_RELAX_T     = 0.30f;
 static const float T_PIVOT_MAX       = 0.90f;
-static const float PIVOT_SWEEP_MMPS  = 280.0f;
+static const float PIVOT_SWEEP_MMPS  = 300.0f;
 static const float HANDOVER_T        = 0.35f;
-static const float V_HANDOVER        = 85.0f;
-static const float F_IN_HANDOVER     = -40.0f;
+static const float V_HANDOVER        = 80.0f;
+static const float F_IN_HANDOVER     = -50.0f;
 static const float U_MAX_HANDOVER    = 90.0f;
 
-// ---------------------------- [V3 + V4.1] Lái chủ động khi vào cua ---------
-static const float T_PRED         = 0.045f;  // s: nhìn trước vị trí vạch bằng vx_f sạch nhiễu
-static const float RISK_X0        = 8.5f;    // mm: bắt đầu nới sàn bánh trong sớm hơn một chút
-static const float RISK_X1        = 19.5f;   // mm: đạt mức nới sàn tối đa
-static const float F_IN_EMERG     = -20.0f;  // cho phép ghì nhẹ bánh trong ở đỉnh cua gắt để ôm sát tâm
-static const float TAU_RISK_UP    = 0.006f;  // s: hạ sàn bánh trong cực nhanh khi phát hiện cua (6 ms)
-static const float TAU_RISK_DN    = 0.045f;  // s: nâng sàn bánh trong mượt mà khi thoát cua (45 ms)
+// ---------------------------- [V5] Lái chủ động 2 tầng khi vào cua ---------
+// Tầng 1 (0.0 < risk <= 0.55): hạ sàn bánh trong êm ái từ F_IN_MIN (+30) về 0.0 (không đảo chiều -> siêu mượt).
+// Tầng 2 (0.55 < risk <= 1.0): mở khóa phanh ngược chủ động từ 0.0 xuống F_IN_EMERG (-38) để cứu các góc cua gắt.
+static const float T_PRED        = 0.055f;  // s   nhìn trước 55ms để dự báo vị trí vạch
+static const float RISK_X0       = 7.5f;    // mm  |x_dự báo| < giá trị này: nguy cơ = 0 (đi thẳng/cua nhẹ)
+static const float RISK_X1       = 19.0f;   // mm  |x_dự báo| >= giá trị này: nguy cơ = 1 (cua gắt)
+static const float RISK_BRAKE_TH = 0.55f;   // ngưỡng nguy cơ bắt đầu cho phép bánh trong phanh ngược (< 0)
+static const float F_IN_EMERG    = -38.0f;  // sàn bánh trong khi nguy cơ = 1 (phanh chủ động giữ chặt line)
 
 // ============================================================================
 // 2. CHÂN PHẦN CỨNG (GIỮ NGUYÊN)
@@ -154,8 +153,8 @@ const bool INVERT_RIGHT_MOTOR = false;
 const bool SWAP_MOTORS_LR     = false;
 
 // Bộ giới hạn gia tốc đầu ra (đơn vị: duty sau deadzone, mỗi tick 2 ms)
-#define SLEW_UP_PER_TICK     36
-#define SLEW_DN_PER_TICK     140
+#define SLEW_UP_PER_TICK     40
+#define SLEW_DN_PER_TICK     160
 #define REVERSE_STEP         140
 #define REVERSE_PAUSE_TICKS  2
 
@@ -173,12 +172,13 @@ static inline int   roundi(float v) { return (int)((v >= 0.0f) ? (v + 0.5f) : (v
 static inline int   sgn(float v) { return (v >= 0.0f) ? 1 : -1; }
 
 struct SensorData {
-    float ir[4];      // 0.0 = trắng, 1.0 = đen
+    float ir[4];      // 0.0 = màu nền hiện tại, 1.0 = vạch đen (đã khử trôi nền)
     int   raw_ir[4];
     float elapsed_sec;
 };
 
 // Trộn bánh: ưu tiên GIỮ chênh lệch (lái), điều chỉnh tốc độ nền tối thiểu.
+// Đảm bảo: bánh ngoài <= 255, bánh trong >= f_in.
 static void mixWheels(float v, float u, float f_in, float& vl, float& vr) {
     float a_max = 0.5f * (255.0f - f_in);
     float a = fabsf(u);
@@ -209,14 +209,14 @@ public:
 
     float x, vx, vx_f;
     bool  need_reinit;
-    float integ, u_abs_f, u_cmd, u_out_f, risk_f;
+    float integ, u_abs_f, u_cmd;
     float v_cmd, v_est, dist_mm;
     int   last_side;
 
     bool  in_loss, meas_ok;
     float lost_t, lost_d, lost_x;
     int   lost_side;
-    float handover_t;
+    float handover_t, reentry_t;
 
     bool  was_lifted, has_seen_line;
     float off_track_t, run_t;
@@ -245,12 +245,12 @@ public:
     void reset() {
         mode = M_RUN; mode_t = 0.0f; mode_d = 0.0f;
         x = 0.0f; vx = 0.0f; vx_f = 0.0f; need_reinit = true;
-        integ = 0.0f; u_abs_f = 0.0f; u_cmd = 0.0f; u_out_f = 0.0f; risk_f = 0.0f;
+        integ = 0.0f; u_abs_f = 0.0f; u_cmd = 0.0f;
         v_cmd = V_START; v_est = 0.0f; dist_mm = 0.0f;
         last_side = 1;
         in_loss = false; meas_ok = false;
         lost_t = 0.0f; lost_d = 0.0f; lost_x = 0.0f; lost_side = 1;
-        handover_t = 0.0f;
+        handover_t = 0.0f; reentry_t = 0.0f;
         was_lifted = false; has_seen_line = false;
         off_track_t = 0.0f; run_t = 0.0f;
         base_init = false; base_o[0] = base_o[1] = 0.0f;
@@ -335,27 +335,44 @@ private:
         dist_mm += v_est * dt;
     }
 
-    // ---- Ước lượng vị trí vạch (mm) từ 4 cảm biến; false nếu không thấy vạch ----
+    // ---- [V5-MEAS] Ước lượng vị trí vạch liên tục (xóa điểm mù đạo hàm 16..22mm) ----
     bool measure(const float* s, float& z) const {
+        // Khử sàn nền vi sai cục bộ trong khung hình (bảo vệ thêm khi nền vừa đổi tức thì)
+        float s_min = min4f(s[0], s[1], s[2], s[3]);
+        float s_max = max4f(s[0], s[1], s[2], s[3]);
+        float bg = (s_max - s_min > 0.28f && s_min < 0.45f) ? s_min : 0.0f;
+        float inv_span = 1.0f / (1.0f - bg - W_FLOOR);
+
         float w[4], wsum = 0.0f;
         for (int i = 0; i < 4; i++) {
-            float c = (s[i] - W_FLOOR) * (1.0f / (1.0f - W_FLOOR));
-            c = clampf(c, 0.0f, 1.0f);
-            // Làm mượt trọng số quanh rìa cảm biến (giảm bậc thang khi vạch đi giữa S2-S3)
-            w[i] = c * (0.75f + 0.25f * c);
+            float c = (s[i] - bg - W_FLOOR) * inv_span;
+            w[i] = (c > 0.0f) ? min2f(c, 1.0f) : 0.0f;
             wsum += w[i];
         }
         if (wsum < WSUM_MIN) return false;
+
         float num = 0.0f;
         for (int i = 0; i < 4; i++) num += w[i] * SENSOR_X_MM[i];
         float xc = num / wsum;
 
-        // Ngoại suy liên tục khi vạch chỉ còn chạm cảm biến rìa
+        // [V5] Bù độ dốc vai (Shoulder) + Ngoại suy mép ngoài (Outer Edge)
+        // Khi vạch dịch từ S3(11.25) ra S4(20.0), w[2] giảm dần về 0 trong khi w[3] vẫn ~1.0.
+        // Shoulder boost giữ cho đạo hàm dz/dx luôn dương và liên tục suốt từ 15mm -> 32mm.
         if (w[3] >= w[0]) {
+            float opp = w[0] + w[1];
+            if (w[3] > w[2] && opp < 0.20f) {
+                float sh = (w[3] - w[2]) / (w[3] + w[2] + 0.05f);
+                xc += K_SHOULDER_MM * sh * clampf(1.0f - opp / 0.20f, 0.0f, 1.0f);
+            }
             float inner = w[0] + w[1] + w[2];
             float b = clampf(1.0f - inner / 0.32f, 0.0f, 1.0f);
             xc += b * K_EXT_MM * (1.0f - min2f(w[3], 1.0f));
         } else {
+            float opp = w[2] + w[3];
+            if (w[0] > w[1] && opp < 0.20f) {
+                float sh = (w[0] - w[1]) / (w[0] + w[1] + 0.05f);
+                xc -= K_SHOULDER_MM * sh * clampf(1.0f - opp / 0.20f, 0.0f, 1.0f);
+            }
             float inner = w[1] + w[2] + w[3];
             float b = clampf(1.0f - inner / 0.32f, 0.0f, 1.0f);
             xc -= b * K_EXT_MM * (1.0f - min2f(w[0], 1.0f));
@@ -364,12 +381,12 @@ private:
         return true;
     }
 
-    // ---- [V4] Theo dõi hai cánh S1,S4 ----
+    // ---- [V4 + V5] Theo dõi hai cánh S1, S4 thích ứng nền ---------------------
     void updateWingBase(const float* s, float dt) {
         if (!base_init) { base_o[0] = s[0]; base_o[1] = s[3]; base_init = true; }
-        const float ab = dt / (0.15f + dt);
-        base_o[0] += ((s[0] < 0.45f) ? ab : ab * 0.125f) * (s[0] - base_o[0]);
-        base_o[1] += ((s[3] < 0.45f) ? ab : ab * 0.125f) * (s[3] - base_o[1]);
+        const float ab = dt / (0.10f + dt);   // [V5] bám nền cánh nhanh hơn khi đổi màu sàn
+        base_o[0] += ((s[0] < 0.45f) ? ab : ab * 0.10f) * (s[0] - base_o[0]);
+        base_o[1] += ((s[3] < 0.45f) ? ab : ab * 0.10f) * (s[3] - base_o[1]);
     }
 
     void clearWings() {
@@ -384,11 +401,13 @@ private:
         const int idx[2] = { 0, 3 };
         for (int k = 0; k < 2; k++) {
             float v = s[idx[k]];
+            float th_on  = max2f(WING_ON,  base_o[k] + WING_DELTA_ON);
+            float th_off = max2f(WING_OFF, base_o[k] + 0.18f);
             if (w_on[k]) {
                 w_last_d[k] = dist_mm;
-                if (v < WING_OFF) { w_on[k] = false; w_fell[k] = true; w_fall_d[k] = dist_mm; }
+                if (v < th_off) { w_on[k] = false; w_fell[k] = true; w_fall_d[k] = dist_mm; }
             } else if (!w_rose[k]) {
-                if (v > WING_ON && base_o[k] < WING_BASE_MAX) {
+                if (v > th_on && base_o[k] < WING_BASE_MAX) {
                     if (w_ticks[k] == 0) w_cand_d[k] = dist_mm;
                     if (++w_ticks[k] >= WING_DEBOUNCE_TICKS) {
                         w_on[k] = true; w_rose[k] = true; w_fell[k] = false;
@@ -471,36 +490,33 @@ private:
         meas_ok = measure(s, z);
         if (meas_ok) {
             if (in_loss) {
-                // [V4.1] Khi vừa bắt lại vạch từ rìa ngoài: khởi tạo sẵn vận tốc quét vào trong
-                // để khâu D đỡ đầu xe mượt mà, không bị vọt lố qua bên kia vạch.
-                bool long_loss = (lost_t > 0.012f);
-                float sweep_vx = -(float)lost_side * clampf(lost_t * 1100.0f, 70.0f, 230.0f);
                 in_loss = false;
-                if (long_loss) {
+                // [V5] Khi vừa bắt lại vạch từ ngoài rìa, gán vận tốc quét vào tâm để KD_IN phanh mượt, chống vọt lố!
+                if (lost_t > 0.012f) {
                     x = z;
-                    vx = sweep_vx;
-                    vx_f = sweep_vx;
+                    vx = -(float)lost_side * clampf(160.0f + 250.0f * lost_t, 140.0f, 320.0f);
+                    vx_f = vx;
                     need_reinit = false;
+                    reentry_t = REENTRY_T;
                 }
-                if (lost_t > 0.12f) integ *= 0.25f;
+                if (lost_t > 0.12f) integ *= 0.35f;
                 lost_t = 0.0f; lost_d = 0.0f;
             }
             if (!need_reinit) {
                 float xp = x + vx * dt;
                 float r  = z - xp;
                 if (fabsf(r) > JUMP_MM) {
-                    need_reinit = true;
+                    x = z; vx = 0.0f; vx_f = 0.0f; need_reinit = false;
                 } else {
-                    x   = xp + AB_ALPHA * r;
+                    x  = xp + AB_ALPHA * r;
                     vx += (AB_BETA / dt) * r;
-                    vx  = clampf(vx, -1500.0f, 1500.0f);
-                    vx_f += (vx - vx_f) * (dt / (TAU_VX_F + dt));
+                    vx = clampf(vx, -1600.0f, 1600.0f);
+                    vx_f += (vx - vx_f) * (dt / (VX_FILTER_TAU + dt));
                 }
-            }
-            if (need_reinit) {
+            } else {
                 x = z; vx = 0.0f; vx_f = 0.0f; need_reinit = false;
             }
-            if (fabsf(x) > 3.0f) last_side = (x > 0.0f) ? 1 : -1;
+            if (fabsf(x) > 2.5f) last_side = (x > 0.0f) ? 1 : -1;
         } else {
             if (!in_loss) {
                 in_loss = true; lost_t = 0.0f; lost_d = 0.0f; lost_x = x;
@@ -510,7 +526,7 @@ private:
             lost_d += v_est * dt;
             x = clampf(x + vx * dt, -X_LIM_MM, X_LIM_MM);
             vx *= 0.95f;
-            vx_f *= 0.95f;
+            vx_f = vx;
             if (lost_t > LOST_GIVEUP_S) was_lifted = true;
         }
         if (crossing) enterCross();
@@ -526,78 +542,92 @@ private:
             f_in  = F_IN_HANDOVER;
             a_cap = min2f(U_MAX_HANDOVER, 0.5f * (255.0f - f_in));
         }
-        float u_target = 0.0f, v_t = V_MAX;
+        if (reentry_t > 0.0f) reentry_t -= dt;
+
+        float u = 0.0f, v_t = V_MAX;
 
         if (!in_loss) {
             float ae = fabsf(x);
+            bool  diverging = (x * vx_f >= 0.0f);   // true = vạch đang trôi ra xa tâm (vào cua)
 
-            // [V4.1] Dự báo vị trí bằng vx_f đã lọc sạch nhiễu, lọc bất đối xứng cho risk_f
-            float x_pred   = x + T_PRED * vx_f;
-            float ae_pred  = max2f(fabsf(x_pred), ae);
-            float risk_raw = clampf((ae_pred - RISK_X0) / (RISK_X1 - RISK_X0), 0.0f, 1.0f);
-            float tau_r    = (risk_raw > risk_f) ? TAU_RISK_UP : TAU_RISK_DN;
-            risk_f += (risk_raw - risk_f) * (dt / (tau_r + dt));
+            // [V5] Dự báo vị trí vạch sau T_PRED (55ms)
+            float x_pred  = x + T_PRED * vx_f;
+            float ae_pred = fabsf(x_pred);
+            float risk_x  = max2f(ae, diverging ? ae_pred : (0.75f * ae_pred));
+            float risk    = clampf((risk_x - RISK_X0) / (RISK_X1 - RISK_X0), 0.0f, 1.0f);
 
+            // [V5-FLOOR] Sàn bánh trong 2 tầng:
+            //   - risk <= 0.55: hạ êm từ F_IN_MIN (+30) về 0 (không đảo chiều -> xe lướt siêu mượt)
+            //   - risk >  0.55: phanh ngược chủ động từ 0 xuống F_IN_EMERG (-38) khi vào cua gắt
             if (!handover) {
-                f_in  = F_IN_MIN + (F_IN_EMERG - F_IN_MIN) * risk_f;
+                if (risk <= RISK_BRAKE_TH) {
+                    float r1 = risk / RISK_BRAKE_TH;
+                    f_in = F_IN_MIN * (1.0f - r1);
+                } else {
+                    float r2 = (risk - RISK_BRAKE_TH) / (1.0f - RISK_BRAKE_TH);
+                    f_in = F_IN_EMERG * r2;
+                }
                 a_cap = 0.5f * (255.0f - f_in);
             }
 
-            // [V4.1] KP bậc 2 + KD bất đối xứng (tăng lực bẻ khi trôi ra khỏi vạch, đỡ êm khi về tâm)
-            float kp = KP * (1.0f + (ae / KP_NL_MM) + KP_QUAD * ae * ae);
-            bool  drifting_away = (x * vx_f > 0.0f);
-            float kd_eff = drifting_away ? (KD * (1.0f + KD_AWAY_BOOST)) : KD;
+            // [V5-PID] Bất đối xứng theo pha:
+            //   - Đang vào cua (diverging): KP phi tuyến mạnh + KD_OUT để bẻ mũi xe sớm.
+            //   - Đang trả lái về tâm (!diverging): làm dịu KP + tăng giảm chấn KD_IN để triệt tiêu vọt lố.
+            float nl_scale = diverging ? (ae / KP_NL_MM) : (0.60f * ae / KP_NL_MM);
+            float kp = KP * (1.0f + nl_scale);
+            float kd = (diverging && reentry_t <= 0.0f) ? KD_OUT : KD_IN;
+            if (reentry_t > 0.0f) kd *= 1.15f;   // tăng giảm chấn khi vừa bắt lại line
 
-            float u_raw = kp * x + integ + kd_eff * vx_f;
-            bool  sat   = fabsf(u_raw) > a_cap;
-
-            // Cửa sổ tích phân mượt + Xả nhanh khi đảo bên qua tâm (chống văng ở cua chữ S)
+            // Tích phân độ cong toàn dải + xả nhanh khi đổi dấu sai số (thoát cua)
+            float u_pd = kp * x + kd * vx_f;
+            float u_raw = u_pd + integ;
+            bool  sat = fabsf(u_raw) > a_cap;
             if (ae < I_ACTIVE_MM && !(sat && ((u_raw > 0.0f) == (x > 0.0f)))) {
-                float w_int = clampf(1.0f - max2f(0.0f, ae - 12.0f) / (I_ACTIVE_MM - 12.0f), 0.2f, 1.0f);
-                integ += KI * w_int * x * dt;
+                integ += KI * x * dt;
             }
-            float leak_tau = ((x * integ < 0.0f) && (ae > 1.8f)) ? I_CROSS_TAU : I_LEAK_TAU;
+            float leak_tau = ((x * integ) < 0.0f) ? (0.25f * I_LEAK_TAU) : I_LEAK_TAU;
             integ -= integ * (dt / leak_tau);
             integ = clampf(integ, -I_MAX, I_MAX);
 
-            u_target = clampf(u_raw, -a_cap, a_cap);
-            u_abs_f += (fabsf(u_target) - u_abs_f) * (dt / (0.055f + dt));
+            u = clampf(u_pd + integ, -a_cap, a_cap);
 
-            // Giảm tốc chủ động nhìn trước theo ae_spd
-            float ae_spd = max2f(ae, 0.75f * fabsf(x_pred));
-            v_t = V_MAX - K_SPD_U * u_abs_f - K_SPD_E * max2f(0.0f, ae_spd - E_SPD_DEAD_MM);
+            // [V5-BRAKE] Lọc nỗ lực lái bất đối xứng: tăng nhanh (12ms) để phanh sớm đầu cua, giảm êm (85ms)
+            float u_abs = fabsf(u);
+            float tau_u = (u_abs > u_abs_f) ? 0.012f : 0.085f;
+            u_abs_f += (u_abs - u_abs_f) * (dt / (tau_u + dt));
+
+            // Tốc độ lệch ra mép dùng để phanh đón đầu ngay khi chớm vào cua
+            float div_rate = diverging ? fabsf(vx_f) : (0.25f * fabsf(vx_f));
+            float e_spd    = max2f(ae, 0.85f * ae_pred);
+
+            v_t = V_MAX
+                - K_SPD_U  * u_abs_f
+                - K_SPD_E  * max2f(0.0f, e_spd - E_SPD_DEAD_MM)
+                - K_SPD_VX * max2f(0.0f, div_rate - VX_SPD_DEAD);
             v_t = clampf(v_t, V_CORNER_MIN, V_MAX);
         } else {
             float lx = fabsf(lost_x);
             if (lx < GAP_X_MM && lost_d < GAP_HOLD_MM) {
                 // Khe hở trên vạch thẳng: giữ hướng, giữ I
-                u_target = clampf(integ, -a_cap, a_cap);
+                u = clampf(integ, -a_cap, a_cap);
                 v_t = min2f(v_cmd, V_GAP_MAX);
             } else {
-                // Vạch rời khỏi dải cảm biến: bẻ mượt về phía vạch vừa rời
-                risk_f = 1.0f;
+                // Vạch rời khỏi dải cảm biến ở góc cua gắt: dùng sàn F_IN_EMERG để quay mũi xe bắt lại vạch ngay
                 if (!handover) { f_in = F_IN_EMERG; a_cap = 0.5f * (255.0f - f_in); }
                 float ramp = clampf(lost_t / LOST_RAMP_S, 0.0f, 1.0f);
-                float eff_x = max2f(lx, 20.0f);
-                float kp_l = KP * (1.0f + (eff_x / KP_NL_MM) + KP_QUAD * eff_x * eff_x);
-                float u0   = min2f(kp_l * eff_x, U_LOST_MAX);
+                float u0   = min2f(KP * (1.0f + lx / KP_NL_MM) * max2f(lx, 20.0f), U_LOST_MAX);
                 float mag  = u0 + (U_LOST_MAX - u0) * ramp;
-                u_target = (float)lost_side * min2f(mag, a_cap);
+                u = (float)lost_side * min2f(mag, a_cap);
                 v_t = V_LOST;
             }
         }
-
-        // Lọc mượt đầu ra lái u_out_f trước khi trộn hai bánh
-        u_out_f += (u_target - u_out_f) * (dt / (TAU_U_OUT + dt));
-        float u_apply = clampf(u_out_f, -a_cap, a_cap);
-
         rampSpeed(v_t, dt);
-        mixWheels(v_cmd, u_apply, f_in, vl, vr);
-        u_cmd = u_apply;
+        mixWheels(v_cmd, u, f_in, vl, vr);
+        u_cmd = u;
 
         // [V4] lái "sạch": chỉ cập nhật khi chưa có cánh nào chạm vạch ngang
         if (!handover && !in_loss && !w_rose[0] && !w_rose[1] && w_ticks[0] == 0 && w_ticks[1] == 0)
-            u_ref += (u_apply - u_ref) * (dt / (U_REF_TAU + dt));
+            u_ref += (u - u_ref) * (dt / (U_REF_TAU + dt));
     }
 
     // ---- Đi thẳng qua ngã tư ----
@@ -610,7 +640,6 @@ private:
         clear_ticks = clear ? (clear_ticks + 1) : 0;
         mixWheels(v_cmd, u_hold, F_IN_MIN, vl, vr);
         u_cmd = u_hold;
-        u_out_f = u_hold;
         if ((clear_ticks >= 3 && mode_d > 15.0f) || dist_mm >= end_odo ||
             mode_d > CROSS_PASS_MAX_MM || mode_t > CROSS_PASS_MAX_S) {
             mode = M_RUN;
@@ -631,7 +660,6 @@ private:
         u_hold -= u_hold * (dt / 0.10f);
         mixWheels(v_cmd, u_hold, F_IN_MIN, vl, vr);
         u_cmd = u_hold;
-        u_out_f = u_hold;
         ev_center_d = center_odo;
         if (dist_mm >= center_odo + AXLE_TO_OUTER_ROW_MM || mode_d > ALIGN_FALLBACK_MM || mode_t > ALIGN_FALLBACK_S) {
             enterPivot();
@@ -658,11 +686,8 @@ private:
         if (old_gone && new_in && mode_t > 0.015f) {
             float z = 0.0f;
             if (!measure(s, z)) z = (float)turn_dir * 25.0f;
-            x = z;
-            vx = -(float)turn_dir * PIVOT_SWEEP_MMPS;
-            vx_f = vx;
-            need_reinit = false;
-            integ = 0.0f; u_abs_f = 0.0f; u_cmd = 0.0f; u_out_f = 0.0f; risk_f = 0.0f;
+            x = z; vx = -(float)turn_dir * PIVOT_SWEEP_MMPS; vx_f = vx; need_reinit = false;
+            integ = 0.0f; u_abs_f = 0.0f; u_cmd = 0.0f;
             in_loss = false; lost_t = 0.0f; lost_d = 0.0f;
             handover_t = HANDOVER_T; v_cmd = V_HANDOVER;
             last_side = turn_dir; last_cross_dist = dist_mm;
@@ -673,7 +698,7 @@ private:
         if (mode_t > T_PIVOT_MAX) {
             x = 0.0f; vx = 0.0f; vx_f = 0.0f; need_reinit = true;
             in_loss = false; lost_t = 0.0f; lost_d = 0.0f;
-            integ = 0.0f; u_out_f = 0.0f; risk_f = 0.0f; handover_t = 0.0f; v_cmd = V_LOST;
+            integ = 0.0f; handover_t = 0.0f; v_cmd = V_LOST;
             last_side = turn_dir; last_cross_dist = dist_mm;
             clearWings();
             mode = M_RUN; mode_t = 0.0f;
@@ -682,12 +707,14 @@ private:
 };
 
 // ============================================================================
-// 5. PHẦN CỨNG: ĐỘNG CƠ, CẢM BIẾN
+// 5. PHẦN CỨNG: ĐỘNG CƠ, CẢM BIẾN & THÍCH ỨNG MÀU NỀN [V5]
 // ============================================================================
 Brain brain;
 
-int ir_white_cal[4] = {300, 300, 300, 300};
-int ir_black_cal[4] = {2400, 2400, 2400, 2400};
+int   ir_white_cal[4] = {300, 300, 300, 300};
+int   ir_black_cal[4] = {2400, 2400, 2400, 2400};
+int   ir_white_ofs[4] = {0, 0, 0, 0};   // [V5] độ lệch phần cứng giữa 4 mắt cảm biến trên cùng màu nền
+float cm_bg_floor     = 0.0f;           // [V5] sàn nền đồng pha tức thời (khử đổi màu nền trong 2ms)
 
 unsigned long startMicros         = 0;
 unsigned long lastStepMicros      = 0;
@@ -813,7 +840,7 @@ static void bbDump() {
 #endif
 
 // ============================================================================
-// 7. KHỞI TẠO + AUTO-CALIB (giữ nguyên thuật toán gốc)
+// 7. KHỞI TẠO + AUTO-CALIB
 // ============================================================================
 void setup() {
 #if defined(RTC_CNTL_BROWN_OUT_REG) && defined(RTC_CNTL_BROWN_OUT_ENA)
@@ -886,8 +913,8 @@ void setup() {
     int global_min = min(min(min_seen[0], min_seen[1]), min(min_seen[2], min_seen[3]));
     int global_max = max(max(max_seen[0], max_seen[1]), max(max_seen[2], max_seen[3]));
 
-    if (global_min > 1200) global_min = 320;
-    if (global_max < global_min + 650 || global_max > 3850) {
+    if (global_min > 1600) global_min = 320;
+    if (global_max < global_min + 600 || global_max > 3880) {
         global_max = constrain(global_min + 1500, 1400, 3200);
     }
 
@@ -895,17 +922,20 @@ void setup() {
         if (min_seen[i] < global_min + 220) ir_white_cal[i] = min_seen[i];
         else                                ir_white_cal[i] = global_min;
 
-        if (max_seen[i] > ir_white_cal[i] + 650 && max_seen[i] < 3850) ir_black_cal[i] = max_seen[i];
+        ir_white_ofs[i] = constrain(ir_white_cal[i] - global_min, -120, 120);
+
+        if (max_seen[i] > ir_white_cal[i] + 600 && max_seen[i] < 3880) ir_black_cal[i] = max_seen[i];
         else ir_black_cal[i] = max(global_max, ir_white_cal[i] + 1200);
     }
 
+    cm_bg_floor = 0.0f;
     brain.reset();
     startMicros    = micros();
     lastStepMicros = startMicros;
 }
 
 // ============================================================================
-// 8. VÒNG LẶP 500 Hz
+// 8. VÒNG LẶP 500 Hz + THÍCH ỨNG MÀU NỀN 2 LỚP [V5-SURF]
 // ============================================================================
 void loop() {
     unsigned long nowMicros  = micros();
@@ -930,33 +960,90 @@ void loop() {
         if (raw > frame_max_raw) frame_max_raw = raw;
     }
 
-    int  frame_span     = frame_max_raw - frame_min_raw;
-    bool valid_contrast = (frame_span > 500) && (frame_min_raw < 1300) && (frame_max_raw < 3950);
-    bool slow_tick      = ((loopFrameCount & 0x1F) == 0);
+    int  frame_span = frame_max_raw - frame_min_raw;
+    int  bg_thresh  = frame_min_raw + (frame_span >> 2);   // nhóm 25% thấp nhất trong khung hình = đang ở trên nền
+    int  bg_cnt     = 0;
+    int  bg_sum     = 0;
+    for (int i = 0; i < 4; i++) {
+        if (sData.raw_ir[i] <= bg_thresh) {
+            bg_cnt++;
+            bg_sum += sData.raw_ir[i];
+        }
+    }
 
+    // [V5-SURF] Lớp 1: Hiệu chuẩn thích ứng nhanh & đồng bộ 4 cảm biến
+    // Cho phép nền thay đổi rộng (từ trắng 200 tới nền màu/gỗ/xám 2200) miễn là vẫn có tương phản với vạch đen
+    bool valid_contrast = (frame_span > 420) && (frame_min_raw < 2200) &&
+                          (frame_max_raw < 3960) && (brain.off_track_t < 0.04f) &&
+                          (brain.mode == Brain::M_RUN);
+    bool slow_tick      = ((loopFrameCount & 0x0F) == 0);   // mỗi 16 tick (32 ms)
+    int  bg_ref         = (bg_cnt > 0) ? (bg_sum / bg_cnt) : frame_min_raw;
+
+    float raw_norm[4];
     for (int i = 0; i < 4; i++) {
         int raw = sData.raw_ir[i];
 
-        if (valid_contrast && brain.off_track_t < 0.04f) {
-            if (raw > 20 && raw < ir_white_cal[i]) {
-                ir_white_cal[i] = (ir_white_cal[i] * 3 + raw) / 4;
-            } else if (slow_tick && raw < ir_white_cal[i] + 250 && ir_white_cal[i] < 1100) {
-                ir_white_cal[i] += 1;
+        if (valid_contrast) {
+            if (raw <= bg_thresh) {
+                // Cảm biến này đang nhìn trực tiếp màu nền hiện tại
+                if (raw > 20 && raw < ir_white_cal[i]) {
+                    // Nền sáng hơn: kéo xuống cực nhanh
+                    ir_white_cal[i] = (ir_white_cal[i] * 3 + raw) >> 2;
+                } else if (bg_cnt >= 2 && raw > ir_white_cal[i]) {
+                    // Nền tối hơn (đổi màu sàn): khi có >= 2 cảm biến cùng xác nhận nền, kéo lên nhanh (~30ms)
+                    ir_white_cal[i] += (raw - ir_white_cal[i] + 7) >> 4;
+                }
+            } else if (bg_cnt >= 2) {
+                // Cảm biến này đang nằm trên vạch đen: kéo đồng bộ ngưỡng trắng theo các mắt đang ở trên nền
+                int target_w = constrain(bg_ref + ir_white_ofs[i], 40, 2100);
+                ir_white_cal[i] += (target_w - ir_white_cal[i]) >> 5;
             }
-            if (raw > ir_white_cal[i] + 600 && raw < 3850) {
-                if (raw > ir_black_cal[i]) ir_black_cal[i] = (ir_black_cal[i] * 3 + raw) / 4;
+
+            // Cập nhật mức đen khi cảm biến nằm ở đỉnh vạch đen
+            if (raw >= frame_max_raw - (frame_span >> 3) && raw > ir_white_cal[i] + 500 && raw < 3900) {
+                if (raw > ir_black_cal[i]) {
+                    ir_black_cal[i] = (ir_black_cal[i] * 3 + raw) >> 2;
+                } else if (slow_tick) {
+                    ir_black_cal[i] += (raw - ir_black_cal[i]) >> 4;
+                }
             }
         }
 
-        int min_valid_black = ir_white_cal[i] + 650;
-        if (slow_tick && ir_black_cal[i] > min_valid_black + 250) ir_black_cal[i] -= 3;
+        int min_valid_black = ir_white_cal[i] + 550;
+        if (slow_tick && ir_black_cal[i] > min_valid_black + 300) ir_black_cal[i] -= 2;
         if (ir_black_cal[i] < min_valid_black) ir_black_cal[i] = min_valid_black;
 
         int effective_span = ((ir_black_cal[i] - ir_white_cal[i]) * 86) / 100;
-        if (effective_span < 500) effective_span = 500;
+        if (effective_span < 450) effective_span = 450;
 
         float norm = (float)(raw - ir_white_cal[i]) / (float)effective_span;
-        sData.ir[i] = clampf(norm, 0.0f, 1.0f);
+        raw_norm[i] = clampf(norm, 0.0f, 1.0f);
+    }
+
+    // [V5-SURF] Lớp 2: Khử nền đồng pha tức thì (2ms Common-Mode Floor Suppression)
+    // Ngay khoảnh khắc xe bước qua ranh giới 2 màu nền (chưa cần đợi bộ lọc hiệu chuẩn hội tụ),
+    // ít nhất 2 cảm biến ngoài vạch đen sẽ báo mức sàn mới (n_min). Trừ thẳng sàn này để giữ nguyên độ nhạy PID!
+    float n_min = min4f(raw_norm[0], raw_norm[1], raw_norm[2], raw_norm[3]);
+    float n_max = max4f(raw_norm[0], raw_norm[1], raw_norm[2], raw_norm[3]);
+    int   n_bg_cnt = 0;
+    for (int i = 0; i < 4; i++) {
+        if (raw_norm[i] <= n_min + 0.18f) n_bg_cnt++;
+    }
+
+    if (brain.mode == Brain::M_RUN && (n_max - n_min) > 0.28f && n_min < 0.52f && n_bg_cnt >= 2) {
+        // Có cả vạch đen lẫn >= 2 cảm biến nền -> cập nhật sàn nền tức thời
+        float alpha_cm = (n_min > cm_bg_floor) ? 0.45f : 0.60f;
+        cm_bg_floor += alpha_cm * (n_min - cm_bg_floor);
+    } else if (n_min < cm_bg_floor) {
+        cm_bg_floor = n_min;
+    } else {
+        cm_bg_floor *= 0.96f;
+    }
+    cm_bg_floor = clampf(cm_bg_floor, 0.0f, 0.48f);
+
+    float inv_cm = 1.0f / (1.0f - cm_bg_floor);
+    for (int i = 0; i < 4; i++) {
+        sData.ir[i] = clampf((raw_norm[i] - cm_bg_floor) * inv_cm, 0.0f, 1.0f);
     }
 
     int pwm_l = 0, pwm_r = 0;
@@ -978,8 +1065,8 @@ void loop() {
     unsigned long nowMs = millis();
     if (nowMs - lastTelemetryMillis >= 120 && Serial.availableForWrite() > 64) {
         lastTelemetryMillis = nowMs;
-        Serial.printf("[t=%5.2f] M%d x=%+5.1f vx=%+6.0f u=%+4.0f | IR=[%.2f,%.2f,%.2f,%.2f] | PWM=(%+4d,%+4d)\n",
-                      sData.elapsed_sec, (int)brain.mode, brain.x, brain.vx_f, brain.u_cmd,
+        Serial.printf("[t=%5.2f] M%d x=%+5.1f vx=%+6.0f u=%+4.0f bg=%.2f | IR=[%.2f,%.2f,%.2f,%.2f] | PWM=(%+4d,%+4d)\n",
+                      sData.elapsed_sec, (int)brain.mode, brain.x, brain.vx_f, brain.u_cmd, cm_bg_floor,
                       sData.ir[0], sData.ir[1], sData.ir[2], sData.ir[3], pwm_l, pwm_r);
     }
 #endif
