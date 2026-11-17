@@ -49,7 +49,7 @@ static const int    CROSS_PLAN_LEN = (int)(sizeof(CROSS_PLAN) / sizeof(CROSS_PLA
 
 // ---------------------------- Hình học xe (mm) -----------------------------
 static const float SENSOR_X_MM[4]       = { -20.0f, -11.25f, 11.25f, 20.0f };   // S1 (trái) ... S4 (phải)
-static const float AXLE_TO_OUTER_ROW_MM = 57.0f;   // trục bánh -> hàng S1/S4
+static const float AXLE_TO_OUTER_ROW_MM = 43.0f;   // trục bánh -> hàng S1/S4
 static const float DEFAULT_LINE_W_MM    = 25.0f;   // điểm xuất phát cho bộ tự đo bề rộng vạch (mm); Brain tự đo lại từ S1..S4 khi chạy!
 static const float SPEED_MMPS_AT_255    = 500.0f;  // tốc độ danh định ban đầu (mm/s); Brain tự hiệu chỉnh online qua v_scale!
 
@@ -57,7 +57,7 @@ static const float SPEED_MMPS_AT_255    = 500.0f;  // tốc độ danh định b
 static const float V_MAX         = 255.0f;   // tốc độ nền tối đa trên đường thẳng (nhanh nhất)
 static const float V_CORNER_MIN  = 165.0f;   // sàn tốc độ nền khi vào cua bình thường (mượt + nhanh)
 static const float V_START       = 110.0f;   // tốc độ khởi động
-static const float V_SEEK_LINE   = 120.0f;   // đi khi chưa thấy vạch
+static const float V_SEEK_LINE   = 0.0f;     // [V5.3] đứng yên chờ vạch nếu đặt ở nền trắng (không tự chạy khi chưa thấy vạch)
 static const float ACC_UP        = 1150.0f;  // PWM/s, tăng tốc nhanh ra khỏi cua (vẫn bảo vệ pin qua slewAxis)
 static const float ACC_DN        = 5500.0f;  // PWM/s, giảm tốc KHẨN (khi nguy cơ rời vạch cao)
 static const float K_SPD_U       = 0.65f;    // giảm tốc theo nỗ lực lái (độ cong)
@@ -110,34 +110,35 @@ static const float REACQ_VX       = 150.0f;   // [V5] mm/s: vận tốc ban đ�
 // ---------------------------- Ngã tư [V4] ----------------------------------
 static const float WING_ON               = 0.50f;   // cánh > ngưỡng này = đang nằm trên vạch ngang
 static const float WING_OFF              = 0.35f;   // cánh < ngưỡng này = đã rời vạch ngang (có trễ)
-static const float WING_BASE_MAX         = 0.30f;   // nền cánh phải < giá trị này mới tính là cạnh lên (loại cua gắt)
+static const float WING_BASE_MAX         = 0.42f;   // nền cánh phải < giá trị này mới tính là cạnh lên (chịu được lệch nhẹ trên vạch rộng)
 static const float WING_SEP_ON           = 0.80f;   // 2 cảm biến cách nhau >= 31 mm cùng > ngưỡng này = có 2 vạch riêng biệt
                                                     //   (chỉ đúng khi bề rộng vạch <= ~30 mm; vạch rộng hơn -> tăng khoảng cách/bỏ điều kiện này)
 static const int   WING_DEBOUNCE_TICKS   = 3;       // cánh đen liên tục >= 3 tick (6 ms) mới tính
 static const float WING_LATCH_MM         = 65.0f;   // hai cánh chạm vạch ngang cách nhau tối đa bấy nhiêu mm xe tiến
                                                     //   (nới nhẹ để chịu được pin yếu trước lần tự hiệu chỉnh tốc độ đầu tiên)
-static const float CROSS_MIN_SPACING_MM  = 250.0f;  // hai ngã tư liên tiếp phải cách nhau >= quãng này (odometer)
+static const float CROSS_MIN_SPACING_MM  = 180.0f;  // hai ngã tư liên tiếp phải cách nhau >= quãng này (tránh lỡ vòng ngắn nếu v_est thấp)
 static const float CROSS_PASS_MAX_MM     = 200.0f;  // chốt chặn khi đi thẳng qua ngã tư
 static const float CROSS_PASS_MAX_S      = 0.80f;
 static const float CROSS_EXIT_MARGIN_MM  = 15.0f;   // đi thêm quãng này sau khi cánh cuối (ước lượng) rời vạch ngang
 static const float U_REF_TAU             = 0.20f;   // s: lái "sạch" (chưa bị vạch ngang làm nhiễu) để giữ hướng qua ngã tư
 
 // ---------------------------- Rẽ tắt (pivot) [V4] --------------------------
-static const float V_ALIGN           = 150.0f;
-static const float ALIGN_FALLBACK_MM = 200.0f;
-static const float ALIGN_FALLBACK_S  = 1.25f;
+static const float V_ALIGN           = 62.0f;    // [V5.3] hãm thấp hơn để không trôi quá tâm ngã tư trước khi pivot
+static const float ALIGN_FALLBACK_MM = 88.0f;    // trần cứng tránh lố xa tâm ngã tư
+static const float ALIGN_FALLBACK_S  = 0.42f;
 static const float P_CLEAR           = 140.0f;   // pivot nhanh: cho tới khi vạch cũ rời hẳn dải cảm biến
 static const float P_SEEK            = 100.0f;   // pivot chậm: từ lúc vạch cũ đã rời tới khi bắt được nhánh mới
+static const float P_APPROACH        = 85.0f;    // [V5.3] giảm nhẹ khi nhánh mới vừa chạm rìa để tránh quét lố
 static const float PIVOT_OLD_ON      = 0.50f;    // cánh phía ngược chiều quay > giá trị này (2 tick) = vạch cũ đang quét qua
 static const float PIVOT_OLD_GONE    = 0.25f;    // ...rồi < giá trị này = vạch cũ đã rời khỏi dải cảm biến
-static const float PIVOT_NEW_OUTER   = 0.50f;    // cánh phía chiều quay > giá trị này (hoặc 2 cảm biến giữa > 0.40) = nhánh mới
+static const float PIVOT_NEW_OUTER   = 0.76f;    // [V5.3] cánh phía chiều quay phải bám rõ (hoặc mắt giữa chạm nhánh mới) mới bàn giao
 static const float PIVOT_RELAX_T     = 0.30f;    // s: quá lâu mà chưa thấy vạch cũ quét qua -> bỏ điều kiện đó
 static const float T_PIVOT_MAX       = 1.25f;
 static const float PIVOT_SWEEP_MMPS  = 300.0f;
-static const float HANDOVER_T        = 0.35f;
-static const float V_HANDOVER        = 80.0f;
+static const float HANDOVER_T        = 0.28f;
+static const float V_HANDOVER        = 90.0f;
 static const float F_IN_HANDOVER     = -50.0f;
-static const float U_MAX_HANDOVER    = 90.0f;
+static const float U_MAX_HANDOVER    = 125.0f;
 
 
 // ---------------------------- [V3] Lái chủ động khi vào cua ----------------
@@ -211,6 +212,7 @@ static const int ADC_RAW_LO_OK       = 20;     // raw <= giá trị này = chạ
 static const int ADC_RAW_HI_OK       = 3850;   // ngưỡng trần chỉ dùng khi IR_WHITE_IS_HIGH == 0
 static const int ADC_FRAME_HI_OK     = 3950;
 static const int MIN_CONTRAST_SPAN   = 400;    // tương phản tối thiểu giữa trắng-đen (chịu được bạt in bóng / pin yếu)
+static const int INIT_CONTRAST_SPAN  = 1000;   // [V5.3] tương phản tối thiểu khi khởi động để coi là đang đè lên vạch đen thật
 static const int EFF_SPAN_MIN        = 350;    // biên độ chuẩn hóa tối thiểu (tránh kẹp IR = 1.00 khi gặp nhiễu)
 static const int WHITE_SEEN_MAX_DARK = 1600;   // cho phép nền sẫm màu hơn vẫn học được
 static const int WHITE_DRIFT_MAX_DARK= 800;    // mức trắng được phép trôi chậm về phía tối tối đa bấy nhiêu so với mốc nền
@@ -302,7 +304,7 @@ public:
     float risk_dbg;      // [V5] nguy cơ (0..1) của tick gần nhất, chỉ để telemetry
 
     bool  was_lifted, has_seen_line;
-    float off_track_t, run_t;
+    float off_track_t, air_t, run_t;
 
     // [V4] theo dõi hai cánh S1 (k=0) và S4 (k=1); mọi khoảng cách là odometer (mm)
     bool  base_init;
@@ -322,6 +324,8 @@ public:
     float pivot_prev_z, pivot_vx_est;
     // sự kiện cho telemetry
     bool  ev_cross; int ev_idx, ev_act; float ev_center_d;
+    bool  ev_align_end; float ev_al_t, ev_al_d, ev_al_rem; uint8_t ev_al_wf;
+    bool  ev_pivot_end; float ev_pv_t, ev_pv_z;
 
     int   prev_pl, prev_pr;
 
@@ -338,7 +342,7 @@ public:
         lost_t = 0.0f; lost_d = 0.0f; lost_x = 0.0f; lost_side = 1;
         handover_t = 0.0f; reacq_vx = 0.0f; risk_dbg = 0.0f;
         was_lifted = false; has_seen_line = false;
-        off_track_t = 0.0f; run_t = 0.0f;
+        off_track_t = 0.0f; air_t = 0.0f; run_t = 0.0f;
         base_init = false; base_o[0] = base_o[1] = 0.0f;
         cross_confirm = 0; cross_count = 0; last_cross_dist = -1.0e6f;
         clear_ticks = 0; white_ticks = 0; turn_dir = 1; pivot_old_seen = false;
@@ -346,8 +350,25 @@ public:
         cross_sec = 1.0f; center_odo = 0.0f; end_odo = 0.0f; align_rem_mm = 0.0f; center_refined = false;
         u_ref = 0.0f; u_hold = 0.0f;
         ev_cross = false; ev_idx = 0; ev_act = 0; ev_center_d = 0.0f;
+        ev_align_end = false; ev_al_t = 0.0f; ev_al_d = 0.0f; ev_al_rem = 0.0f; ev_al_wf = 0;
+        ev_pivot_end = false; ev_pv_t = 0.0f; ev_pv_z = 0.0f;
         clearWings();
         prev_pl = 0; prev_pr = 0;
+    }
+
+    // [V5.3] Phân biệt vạch đen thật với nền trắng/xám phẳng bị lệch độ nhạy giữa các mắt
+    static bool hasRealLine(const float* s) {
+        float s_max = max4f(s[0], s[1], s[2], s[3]);
+        float s_min = min4f(s[0], s[1], s[2], s[3]);
+        if (s_min > 0.85f) return false;
+        float in_max  = max2f(s[1], s[2]);
+        float out_max = max2f(s[0], s[3]);
+        float out_min = min2f(s[0], s[3]);
+        float min_contrast = (s_min > 0.22f) ? 0.38f : 0.26f;
+        bool peak_in_center = (in_max > out_max + 0.05f);
+        if (s_max >= 0.35f && ((s_max - s_min) >= min_contrast || (s_max >= 0.80f && peak_in_center))) return true;
+        // Vạch mảnh (12-18 mm) nằm giữa S2-S3
+        return (in_max >= 0.055f && out_min < 0.05f && (in_max - out_max) >= 0.04f);
     }
 
     // ------------------------------------------------------------------------
@@ -356,38 +377,52 @@ public:
         if (!(dt > 0.0005f && dt < 0.02f)) dt = 0.002f;
         const float* s = sd.ir;
 
-        // ---- Nhấc xe / đặt xe (chịu được cả vạch mảnh 12-18 mm lẫn vạch rộng >35 mm) ----
-        float max_ir = max4f(s[0], s[1], s[2], s[3]);
-        float min_ir = min4f(s[0], s[1], s[2], s[3]);
-        bool all_white = (max_ir < 0.05f);
-        bool all_black = (min_ir > 0.88f);
-        bool spinning  = (mode == M_TURN_PIVOT);
+        // ---- Nhấc xe / nền trắng không vạch / đặt xe ----
+        int max_raw = sd.raw_ir[0], min_raw = sd.raw_ir[0];
+        for (int i = 1; i < 4; i++) {
+            if (sd.raw_ir[i] > max_raw) max_raw = sd.raw_ir[i];
+            if (sd.raw_ir[i] < min_raw) min_raw = sd.raw_ir[i];
+        }
+        bool in_air = (IR_POL < 0) ? (max_raw <= ADC_RAW_LO_OK + 60) : (min_raw >= ADC_FRAME_HI_OK);
+        if (in_air) air_t += dt;
+        else        air_t = 0.0f;
 
-        if ((all_white || all_black) && !spinning) {
-            off_track_t += dt;
-            if (off_track_t > 0.85f) was_lifted = true;
-        } else {
-            if (was_lifted) {
-                if (max_ir > 0.14f && min_ir < 0.55f) {
-                    reset();
-                    has_seen_line = true;
-                }
-            } else {
-                if (max_ir >= 0.12f && min_ir < 0.80f) has_seen_line = true;
-                off_track_t = 0.0f;
+        float min_ir = min4f(s[0], s[1], s[2], s[3]);
+        bool real_line = hasRealLine(s);
+        bool all_black = (min_ir > 0.88f);
+        bool no_line   = !all_black && !real_line;
+        bool spinning  = (mode == M_TURN_PIVOT);
+        bool in_cross  = (mode == M_CROSS_PASS || mode == M_TURN_ALIGN);
+
+        if (air_t > 0.10f) {
+            was_lifted = true;
+        } else if (was_lifted) {
+            if (real_line && min_ir < 0.65f && !in_air) {
+                reset();
+                has_seen_line = true;
             }
+        } else if (!has_seen_line) {
+            if (real_line && min_ir < 0.75f && !in_air) {
+                has_seen_line = true;
+                off_track_t = 0.0f;
+            } else {
+                off_track_t += dt;
+            }
+        } else if ((no_line || all_black) && !spinning && !(in_cross && no_line)) {
+            off_track_t += dt;
+            if (all_black && mode == M_RUN && off_track_t > 0.25f) was_lifted = true;
+            else if (off_track_t > 0.65f)                          was_lifted = true;
+        } else {
+            off_track_t = 0.0f;
         }
         if (was_lifted) { stopOutputs(); return; }
 
         run_t += dt;
         updateSpeedEstimate(dt);
 
-        // ---- Chưa thấy vạch: đi thẳng chậm ----
+        // ---- Chưa thấy vạch: đứng yên chờ đặt lên vạch (tránh tự chạy trên nền trắng) ----
         if (!has_seen_line) {
-            float v = 0.0f;
-            if (off_track_t < 0.45f) { rampSpeed(V_SEEK_LINE, dt); v = v_cmd; }
-            pl = roundi(v); pr = roundi(v);
-            prev_pl = pl; prev_pr = pr;
+            stopOutputs();
             return;
         }
 
@@ -418,13 +453,19 @@ private:
     void updateSpeedEstimate(float dt) {
         float c = 0.5f * (float)(prev_pl + prev_pr);
         if (c < 0.0f) c = 0.0f;
-        float tgt = v_scale * SPEED_MMPS_AT_255 * (c / 255.0f);
-        v_est += (tgt - v_est) * (dt / (0.04f + dt));
+        // Tính đến deadzone MIN_N20_PWM để khi phanh về V_ALIGN = 85 không đánh giá thấp tốc độ thực
+        float c_hw  = (c > 1.0f) ? ((float)MIN_N20_PWM + c * (255.0f - (float)MIN_N20_PWM) / 255.0f) : 0.0f;
+        float c_eff = 0.5f * (c + c_hw);
+        float tgt   = v_scale * SPEED_MMPS_AT_255 * (c_eff / 255.0f);
+        // Quán tính trôi khi giảm tốc chậm hơn lúc kéo ga -> bám sát đà xe khi vào ngã tư
+        float tau = (tgt < v_est) ? 0.105f : 0.040f;
+        v_est += (tgt - v_est) * (dt / (tau + dt));
         dist_mm += v_est * dt;
     }
 
     // ---- Ước lượng vị trí vạch (mm) từ 4 cảm biến; false nếu không thấy vạch ----
     bool measure(const float* s, float& z) const {
+        if (!hasRealLine(s) && min4f(s[0], s[1], s[2], s[3]) <= 0.85f) return false;
         float w[4], wsum = 0.0f;
         for (int i = 0; i < 4; i++) {
             float c = (s[i] - W_FLOOR) * (1.0f / (1.0f - W_FLOOR));
@@ -542,7 +583,7 @@ private:
                 if (v >= WING_ON) w_half_fall_d[k] = dist_mm;   // bám sát mép xuống 50% để đo bề rộng vạch không bị trễ hysteresis
                 if (v < WING_OFF) { w_on[k] = false; w_fell[k] = true; w_fall_d[k] = dist_mm; }
             } else if (!w_rose[k]) {
-                if (v > WING_ON && (base_o[k] < WING_BASE_MAX || (v - base_o[k]) > 0.35f)) {
+                if (v > WING_ON && (base_o[k] < WING_BASE_MAX || (v - base_o[k]) > 0.25f)) {
                     if (w_ticks[k] == 0) w_cand_d[k] = dist_mm;
                     if (++w_ticks[k] >= WING_DEBOUNCE_TICKS) {
                         w_on[k] = true; w_rose[k] = true; w_fell[k] = false;
@@ -552,37 +593,37 @@ private:
                     w_ticks[k] = 0;
                 }
             } else if (mode == M_RUN && (((dist_mm - w_last_d[k]) > WING_LATCH_MM) ||
-                       (w_fell[k] && !w_rose[1 - k] && !w_sep))) {
-                // Xóa latch ngay nếu cánh kia không chạm kịp HOẶC xung vừa rồi đã tắt mà không hề có bằng chứng tách vạch (chỉ là lắc trên vạch rộng)
+                       (w_fell[k] && !w_rose[1 - k] && !w_sep && (dist_mm - w_fall_d[k]) > 18.0f))) {
+                // Xóa latch nếu cánh kia không chạm kịp HOẶC xung đã tắt >18 mm mà không có bằng chứng tách nhánh
                 w_rose[k] = false; w_fell[k] = false; w_ticks[k] = 0;
             }
         }
-        // Bằng chứng "ngã tư thực sự" (không nhầm với vạch đơn 12-40 mm khi xe lắc ngang):
-        //   A) Có khe sáng/giảm giữa cánh ngoài và vạch chính (2 đỉnh tách biệt)
-        //   B) Cả hai cánh ngoài cùng đen đồng thời (độ phủ ngang >= 40 mm)
-        //   C) Cánh ngoài bão hòa (>= 0.85) không thấp hơn cảm biến trong kề bên trong khi phía kia cũng đen
+        // Bằng chứng "ngã tư thực sự" (không nhầm với vạch đơn khi cua):
+        //   A) Có khe giảm sáng giữa cánh ngoài và vạch chính (2 đỉnh tách biệt)
+        //   B) Cả hai cánh ngoài cùng đen đồng thời (độ phủ ngang >= 40 mm) và hai mắt giữa cũng có vạch
+        //   C) Nhánh xiên mạnh: cánh ngoài bão hòa >=0.80 và KHÔNG tối thua mắt giữa kề bên, trong khi phía kia vẫn thấy vạch chính
         if (w_rose[0] || w_rose[1] || w_ticks[0] > 0 || w_ticks[1] > 0) {
-            bool dip_sep = (s[0] > 0.50f && s[1] < s[0] - 0.05f && s[2] > 0.16f) ||
-                           (s[3] > 0.50f && s[2] < s[3] - 0.05f && s[1] > 0.16f);
-            bool both_outer = (s[0] > 0.50f && s[3] > 0.50f && (s[1] > 0.16f || s[2] > 0.16f));
-            bool wide_skew  = (s[0] > 0.85f && s[1] <= s[0] + 0.08f && s[2] > 0.70f) ||
-                              (s[3] > 0.85f && s[2] <= s[3] + 0.08f && s[1] > 0.70f);
-            if (dip_sep || both_outer || wide_skew) w_sep = true;
+            bool dip_sep    = (s[0] > 0.48f && s[1] < s[0] - 0.05f && s[2] > 0.16f) ||
+                              (s[3] > 0.48f && s[2] < s[3] - 0.05f && s[1] > 0.16f);
+            bool both_outer = (s[0] > 0.48f && s[3] > 0.48f && (s[1] > 0.16f || s[2] > 0.16f));
+            bool edge_skew  = (s[0] > 0.80f && s[0] >= s[1] - 0.22f && s[2] > 0.35f) ||
+                              (s[3] > 0.80f && s[3] >= s[2] - 0.22f && s[1] > 0.35f);
+            if (dip_sep || both_outer || edge_skew) w_sep = true;
         } else {
             w_sep = false;
         }
         updateWingBase(s, dt);
     }
 
-    // Ngã tư = cả hai cánh đã chạm vạch ngang (trong cửa sổ WING_LATCH_MM), có bằng chứng hai vạch riêng biệt,
-    // cảm biến giữa còn ở vạch chính, và góc xiên nằm trong giới hạn vật lý hợp lý.
+    // Ngã tư = cả hai cánh đã chạm vạch ngang (mỗi cánh đã lọc 3 tick = 6 ms), có bằng chứng hai vạch riêng biệt,
+    // cảm biến giữa còn ở vạch chính (hoặc cả hai cánh ngoài đang đè vạch ở ngã ba chữ T), và góc xiên hợp lý.
     bool detectCross(const float* s, bool allowed) {
-        float skew_max = v_cal_valid ? 55.0f : 75.0f;
+        float skew_max = v_cal_valid ? 55.0f : 70.0f;
         bool skew_ok = fabsf(w_rise_d[1] - w_rise_d[0]) <= skew_max;
-        bool center = (s[1] > 0.16f || s[2] > 0.16f);
+        bool center = (s[1] > 0.16f || s[2] > 0.16f || (s[0] > 0.45f && s[3] > 0.45f));
         bool trig = allowed && w_rose[0] && w_rose[1] && w_sep && center && skew_ok;
         cross_confirm = trig ? (cross_confirm + 1) : 0;
-        return cross_confirm >= 2;
+        return cross_confirm >= 1;
     }
 
     // Lập kế hoạch qua ngã tư ngay khi phát hiện, dùng bề rộng vạch tự đo line_w_est (không hardcode):
@@ -599,41 +640,61 @@ private:
         center_refined = false;
     }
 
-    // Khi CẢ HAI cánh đã rời vạch ngang và bề dày đo được nhất quán -> dùng line_w_est (đã tự đo từ S1..S4) để
-    // tự hiệu chỉnh v_scale (tốc độ thực / danh định), góc xiên cross_sec, tâm ngã tư, và quãng đường còn lại align_rem_mm.
+    // Tự hiệu chỉnh tốc độ thực v_scale & căn tâm ngã tư:
+    //   - Ưu tiên đo từ CẢ HAI cánh khi cả hai đều rời vạch sạch sẽ
+    //   - Trong M_TURN_ALIGN, nếu cánh phía rẽ bị dính nhánh cong không rời vạch sau 60 ms, dùng cánh ĐỐI DIỆN hướng rẽ
     void refineCenter() {
-        if (center_refined || !(w_fell[0] && w_fell[1])) return;
-        center_refined = true;
-        float L0 = w_half_fall_d[0] - w_rise_d[0], L1 = w_half_fall_d[1] - w_rise_d[1];
-        float L_min_ok = 0.35f * line_w_est;
-        float L_max_ok = 4.00f * line_w_est * cross_sec;
-        if (L0 > L_min_ok && L1 > L_min_ok && L0 < L_max_ok && L1 < L_max_ok &&
-            fabsf(L0 - L1) < 0.45f * max2f(L0, L1)) {
-            float L_meas = 0.5f * (L0 + L1);
-            float d_skew = fabsf(w_rise_d[1] - w_rise_d[0]);
-            float span   = SENSOR_X_MM[3] - SENSOR_X_MM[0];
-            float skew_term = (line_w_est * d_skew) / span;
-            float denom_sq  = max2f(L_meas * L_meas - skew_term * skew_term, 0.25f * L_meas * L_meas);
-            float r = clampf(line_w_est / sqrtf(denom_sq), 0.30f, 2.50f);
+        if (center_refined) return;
+        float L_meas = -1.0f;
+        float fall_mid = dist_mm;
+        float L_min_ok = 0.42f * line_w_est;
+        float L_max_ok = 3.20f * line_w_est * cross_sec;
 
-            float v_scale_old = v_scale;
-            float v_scale_obs = clampf(v_scale_old * r, 0.25f, 2.0f);
-            float blend = !v_cal_valid ? 1.0f : ((mode == M_TURN_ALIGN) ? 0.70f : 0.50f);
-            v_scale = clampf(v_scale_old + blend * (v_scale_obs - v_scale_old), 0.25f, 2.0f);
-            v_cal_valid = true;
-            float r_eff = v_scale / v_scale_old;
-            v_est *= r_eff;
-
-            float t_corr = clampf((r_eff * d_skew) / span, 0.0f, 3.0f);
-            cross_sec = sqrtf(1.0f + t_corr * t_corr);
-            float L_true = line_w_est * cross_sec;
-
-            center_odo = 0.25f * (w_rise_d[0] + w_half_fall_d[0] + w_rise_d[1] + w_half_fall_d[1]);
-            if (mode == M_TURN_ALIGN) {
-                float fall_mid = 0.5f * (w_half_fall_d[0] + w_half_fall_d[1]);
-                float past_fall_real = (dist_mm - fall_mid) * r_eff;
-                align_rem_mm = AXLE_TO_OUTER_ROW_MM - 0.5f * L_true - past_fall_real;
+        if (w_fell[0] && w_fell[1]) {
+            center_refined = true;
+            float L0 = w_half_fall_d[0] - w_rise_d[0], L1 = w_half_fall_d[1] - w_rise_d[1];
+            if (L0 > L_min_ok && L1 > L_min_ok && L0 < L_max_ok && L1 < L_max_ok &&
+                fabsf(L0 - L1) < 0.45f * max2f(L0, L1)) {
+                L_meas = (fabsf(L0 - L1) > 0.20f * max2f(L0, L1)) ? min2f(L0, L1) : (0.5f * (L0 + L1));
+                fall_mid = 0.5f * (w_half_fall_d[0] + w_half_fall_d[1]);
+                center_odo = 0.25f * (w_rise_d[0] + w_half_fall_d[0] + w_rise_d[1] + w_half_fall_d[1]);
             }
+        } else if (mode == M_TURN_ALIGN && (mode_t > 0.055f || (w_fell[turn_dir > 0 ? 0 : 1] && (dist_mm - w_half_fall_d[turn_dir > 0 ? 0 : 1]) > 6.0f))) {
+            int outer_k = (turn_dir > 0) ? 0 : 1;
+            if (w_fell[outer_k]) {
+                float Lo = w_half_fall_d[outer_k] - w_rise_d[outer_k];
+                if (Lo > L_min_ok && Lo < L_max_ok) {
+                    center_refined = true;
+                    L_meas = Lo;
+                    // Bù nửa độ lệch xiên để quy chiếu đúng về tâm giữa S1-S4
+                    fall_mid = w_half_fall_d[outer_k] + 0.5f * (w_rise_d[1 - outer_k] - w_rise_d[outer_k]);
+                }
+            }
+        }
+        if (L_meas <= 0.0f) return;
+
+        float d_skew = fabsf(w_rise_d[1] - w_rise_d[0]);
+        float span   = SENSOR_X_MM[3] - SENSOR_X_MM[0];
+        float skew_term = (line_w_est * d_skew) / span;
+        float denom_sq  = max2f(L_meas * L_meas - skew_term * skew_term, 0.25f * L_meas * L_meas);
+        float r = clampf(line_w_est / sqrtf(denom_sq), 0.42f, 2.20f);
+
+        float v_scale_old = v_scale;
+        float v_scale_obs = clampf(v_scale_old * r, 0.40f, 2.20f);
+        float blend = !v_cal_valid ? 1.0f : ((mode == M_TURN_ALIGN && !(w_fell[0] && w_fell[1])) ? 0.35f : 0.45f);
+        v_scale = clampf(v_scale_old + blend * (v_scale_obs - v_scale_old), 0.40f, 2.20f);
+        v_cal_valid = true;
+        float r_eff = v_scale / v_scale_old;
+        v_est *= r_eff;
+
+        float t_corr = clampf((r_eff * d_skew) / span, 0.0f, 3.0f);
+        cross_sec = sqrtf(1.0f + t_corr * t_corr);
+        float L_true = line_w_est * cross_sec;
+
+        if (mode == M_TURN_ALIGN) {
+            float past_fall_real = (dist_mm - fall_mid) * r_eff;
+            float rem = AXLE_TO_OUTER_ROW_MM - 0.5f * L_true - past_fall_real;
+            align_rem_mm = min2f(rem, AXLE_TO_OUTER_ROW_MM);
         }
     }
 
@@ -662,7 +723,7 @@ private:
 
     // ---- RUN: cập nhật bộ lọc, mất vạch, ngã tư ----
     void runEstimate(const float* s, float dt) {
-        bool allowed = (handover_t <= 0.0f) && !in_loss && (run_t > 0.15f) &&
+        bool allowed = (handover_t <= 0.08f) && !in_loss && (run_t > 0.15f) &&
                        ((dist_mm - last_cross_dist) >= CROSS_MIN_SPACING_MM);
         if (allowed) trackWings(s, dt);
         else { clearWings(); updateWingBase(s, dt); }
@@ -790,6 +851,13 @@ private:
             }
             risk = 1.0f; risk_v = 1.0f;
         }
+        if (handover) {
+            float v_ho = (fabsf(x) > 7.0f || fabsf(vx) > 110.0f) ? V_HANDOVER : 135.0f;
+            if (v_t > v_ho) v_t = v_ho;
+        }
+        if (off_track_t > 0.03f && !in_loss) {
+            v_t = min2f(v_t, V_LOST);
+        }
         rampSpeed(v_t, dt, dn_rate);
         mixWheels(v_cmd, u, f_in, vl, vr);
         u_cmd = u;
@@ -814,7 +882,8 @@ private:
         clear_ticks = clear ? (clear_ticks + 1) : 0;
         mixWheels(v_cmd, u_hold, F_IN_MIN, vl, vr);
         u_cmd = u_hold;
-        if ((clear_ticks >= 3 && mode_d > 15.0f) || dist_mm >= end_odo ||
+        bool wings_done = (w_fell[0] && w_fell[1]);
+        if ((clear_ticks >= 3 && mode_d > 15.0f) || ((wings_done || mode_d > 75.0f) && dist_mm >= end_odo) ||
             mode_d > CROSS_PASS_MAX_MM || mode_t > CROSS_PASS_MAX_S) {
             mode = M_RUN;
             need_reinit = true;
@@ -825,7 +894,8 @@ private:
     }
 
     // ---- Rẽ tắt ----
-    // Tiến thẳng (lái đóng băng) tới khi trục bánh trùng tâm ngã tư: align_rem_mm <= 0 (đã tự hiệu chỉnh theo v_scale).
+    // Tiến thẳng (giảm tốc về V_ALIGN, lái tắt dần) tới khi trục bánh trùng tâm ngã tư.
+    // Bù quán tính trượt khi bắt đầu đảo bánh pivot (~0.025*v_est) và KHÔNG chờ kẹt 0.45s nếu 1 cánh dính nhánh cong.
     void outAlign(const float* s, float dt, float& vl, float& vr) {
         mode_t += dt;
         mode_d += v_est * dt;
@@ -837,9 +907,16 @@ private:
         mixWheels(v_cmd, u_hold, F_IN_MIN, vl, vr);
         u_cmd = u_hold;
         ev_center_d = center_odo;
+        float pivot_lead_mm = clampf(6.0f + 0.045f * v_est, 6.0f, 22.0f);
+        int outer_k = (turn_dir > 0) ? 0 : 1;
         bool wings_cleared = (w_fell[0] && w_fell[1]);
-        if ((wings_cleared && align_rem_mm <= 0.0f) || (!wings_cleared && mode_t > 0.45f && align_rem_mm <= 0.0f) ||
-            mode_d > ALIGN_FALLBACK_MM || mode_t > ALIGN_FALLBACK_S) {
+        bool both_still_on_bar = (s[0] > 0.50f && s[3] > 0.50f);
+        // Không kẹt chờ 0.35s khi 1 cánh dính nhánh rẽ: cánh ngoài rơi hoặc đã qua vạch ngang là đủ điều kiện rẽ
+        bool can_exit_by_dist = (wings_cleared || w_fell[outer_k] || !both_still_on_bar || mode_t > (v_cal_valid ? 0.08f : 0.14f));
+        bool ready_by_dist = (align_rem_mm <= pivot_lead_mm) && can_exit_by_dist;
+        if (ready_by_dist || mode_d > ALIGN_FALLBACK_MM || mode_t > ALIGN_FALLBACK_S) {
+            ev_align_end = true; ev_al_t = mode_t; ev_al_d = mode_d; ev_al_rem = align_rem_mm;
+            ev_al_wf = (w_fell[0] ? 1 : 0) | (w_fell[1] ? 2 : 0);
             enterPivot();
         }
     }
@@ -881,15 +958,17 @@ private:
             pivot_has_z = false;
         }
 
-        float p = old_gone ? P_SEEK : P_CLEAR;
+        float new_out = (turn_dir > 0) ? s[3] : s[0];
+        float p = !old_gone ? P_CLEAR : ((new_out > 0.20f) ? P_APPROACH : P_SEEK);
         vl =  (float)turn_dir * p;
         vr = -(float)turn_dir * p;
         v_cmd = 0.0f;
-        if (old_gone && new_in && mode_t > 0.015f) {
+        if (old_gone && new_in && mode_t > 0.055f) {
             float z = 0.0f;
             if (!measure(s, z)) z = (float)turn_dir * 25.0f;
             x = z;
             vx = (fabsf(pivot_vx_est) > 30.0f) ? pivot_vx_est : (-(float)turn_dir * PIVOT_SWEEP_MMPS * v_scale);
+            ev_pivot_end = true; ev_pv_t = mode_t; ev_pv_z = x;
             need_reinit = false;
             integ = 0.0f; u_abs_f = 0.0f; u_cmd = 0.0f;
             in_loss = false; lost_t = 0.0f; lost_d = 0.0f; reacq_vx = 0.0f;
@@ -900,6 +979,7 @@ private:
             return;
         }
         if (mode_t > T_PIVOT_MAX) {
+            ev_pivot_end = true; ev_pv_t = mode_t; ev_pv_z = 99.0f;
             x = 0.0f; vx = 0.0f; need_reinit = true;
             in_loss = false; lost_t = 0.0f; lost_d = 0.0f; reacq_vx = 0.0f;
             integ = 0.0f; handover_t = 0.0f; v_cmd = V_LOST;
@@ -1140,23 +1220,28 @@ void setup() {
     }
     adc_white_anchor = g_white;
 
-    // Nhận tương phản thực kể cả khi thấp (>= MIN_CONTRAST_SPAN); nếu lúc xuất phát không đè lên vạch thì tạm giả định 1000.
+    // [V5.3] Cần tương phản đủ lớn (>= INIT_CONTRAST_SPAN) mới coi là đang đè vạch đen;
+    // tránh hiểu nhầm độ lệch độ nhạy giữa các mắt trên nền trắng (vd 4095 vs 3307) thành vạch đen.
     int init_span = darker(g_dark, g_white);
-    if (init_span < MIN_CONTRAST_SPAN || g_dark <= ADC_RAW_LO_OK || g_dark >= ADC_RAW_HI_OK) {
-        g_dark = constrain(g_white + IR_POL * 1000, ADC_RAW_LO_OK + 50, ADC_RAW_HI_OK - 50);
+    bool startup_has_line = (init_span >= INIT_CONTRAST_SPAN && g_dark > ADC_RAW_LO_OK && g_dark < ADC_RAW_HI_OK);
+    if (!startup_has_line) {
+        g_dark = constrain(g_white + IR_POL * 1600, ADC_RAW_LO_OK + 50, ADC_RAW_HI_OK - 50);
         init_span = abs(g_dark - g_white);
     }
-    track_span_est = constrain(init_span, MIN_CONTRAST_SPAN, 3000);
+    track_span_est = constrain(init_span, INIT_CONTRAST_SPAN, 3000);
 
+    int white_tol = startup_has_line ? ((init_span / 3 < 850) ? (init_span / 3) : 850) : 950;
     for (int i = 0; i < 4; i++) {
-        // Mức trắng riêng: lấy mẫu sáng nhất của chính nó nếu không tối hơn nền chung quá 220; ngược lại dùng nền chung
-        if (darker(bright_seen[i], g_white) < 220) ir_white_cal[i] = bright_seen[i];
-        else                                        ir_white_cal[i] = g_white;
+        // Mức trắng riêng: lấy mẫu sáng nhất của chính nó nếu thuộc nền trắng (chịu được sai khác giữa các mắt)
+        if (darker(bright_seen[i], g_white) < white_tol) ir_white_cal[i] = bright_seen[i];
+        else                                              ir_white_cal[i] = g_white;
 
-        // Mức đen riêng: lấy mẫu tối nhất của chính nó nếu đủ tương phản (>= MIN_CONTRAST_SPAN) và không bão hòa
+        // Mức đen riêng: chỉ lấy mẫu lúc khởi động nếu thật sự có tương phản vạch đen
         int dk = dark_seen[i];
-        if (darker(dk, ir_white_cal[i]) >= MIN_CONTRAST_SPAN && dk > ADC_RAW_LO_OK && dk < ADC_RAW_HI_OK) ir_black_cal[i] = dk;
-        else ir_black_cal[i] = darkerOf(g_dark, ir_white_cal[i] + IR_POL * track_span_est);
+        if (startup_has_line && darker(dk, ir_white_cal[i]) >= INIT_CONTRAST_SPAN && dk > ADC_RAW_LO_OK && dk < ADC_RAW_HI_OK)
+            ir_black_cal[i] = dk;
+        else
+            ir_black_cal[i] = darkerOf(g_dark, ir_white_cal[i] + IR_POL * track_span_est);
     }
 
     brain.reset();
@@ -1230,21 +1315,22 @@ void loop() {
             if (darker(raw, adc_white_anchor) < 0) adc_white_anchor = (adc_white_anchor * 3 + raw) / 4;
         }
 
-        if (valid_contrast && !brain.was_lifted && brain.off_track_t < 0.04f) {
+        if (valid_contrast && !brain.was_lifted && (brain.off_track_t < 0.04f || frame_span < INIT_CONTRAST_SPAN)) {
             int dw = darker(raw, ir_white_cal[i]);
-            if (slow_tick && dw < 250 && darker(ir_white_cal[i], adc_white_anchor) < WHITE_DRIFT_MAX_DARK) {
+            int white_drift_lim = (frame_span < INIT_CONTRAST_SPAN) ? 600 : 250;
+            if (slow_tick && dw < white_drift_lim && darker(ir_white_cal[i], adc_white_anchor) < WHITE_DRIFT_MAX_DARK) {
                 ir_white_cal[i] += IR_POL;                                            // trôi chậm về phía TỐI (nền ngả tối dần)
             }
             dw = darker(raw, ir_white_cal[i]);
-            if (raw_ok && dw > black_learn_thr && darker(raw, ir_black_cal[i]) > 0) {
+            if (brain.has_seen_line && brain.off_track_t < 0.04f && raw_ok && dw > black_learn_thr && darker(raw, ir_black_cal[i]) > 0) {
                 ir_black_cal[i] = (ir_black_cal[i] * 3 + raw) / 4;                    // đen bám nhanh về phía tối hơn nữa
             }
         }
 
-        // CHỈ co rất chậm (2 đơn vị / 64 ms) khi xe ĐANG CHẠY và có tương phản hợp lệ — tuyệt đối không sập span khi nhấc xe hay ở nền trắng!
+        // CHỈ co rất chậm (2 đơn vị / 64 ms) khi xe ĐANG BÁM VẠCH và có tương phản hợp lệ — tuyệt đối không sập span khi nhấc xe hay ở nền trắng!
         int min_valid_black = ir_white_cal[i] + IR_POL * MIN_CONTRAST_SPAN;
         int cur_span = darker(ir_black_cal[i], ir_white_cal[i]);
-        if (slow_tick && valid_contrast && !brain.was_lifted && brain.off_track_t < 0.04f && cur_span > MIN_CONTRAST_SPAN + 200) {
+        if (slow_tick && valid_contrast && brain.has_seen_line && !brain.was_lifted && brain.off_track_t < 0.04f && cur_span > MIN_CONTRAST_SPAN + 200) {
             ir_black_cal[i] -= 2 * IR_POL;
         }
         if (darker(ir_black_cal[i], min_valid_black) < 0) ir_black_cal[i] = min_valid_black;
@@ -1318,8 +1404,19 @@ void loop() {
 #if ENABLE_SERIAL_TELEMETRY
     if (brain.ev_cross) {
         brain.ev_cross = false;
-        Serial.printf("[CROSS] #%d act=%+d odo=%.0f mm center_odo=%.0f skew_sec=%.2f\n",
-                      brain.ev_idx, brain.ev_act, brain.dist_mm, brain.ev_center_d, brain.cross_sec);
+        Serial.printf("[CROSS] #%d act=%+d odo=%.0f center=%.0f sec=%.2f W=%.1f vs=%.2f\n",
+                      brain.ev_idx, brain.ev_act, brain.dist_mm, brain.ev_center_d, brain.cross_sec,
+                      brain.line_w_est, brain.v_scale);
+    }
+    if (brain.ev_align_end) {
+        brain.ev_align_end = false;
+        Serial.printf("[ALIGN->PIVOT] t=%.3fs d=%.1fmm rem=%.1fmm wf=%d W=%.1f vs=%.2f\n",
+                      brain.ev_al_t, brain.ev_al_d, brain.ev_al_rem, (int)brain.ev_al_wf,
+                      brain.line_w_est, brain.v_scale);
+    }
+    if (brain.ev_pivot_end) {
+        brain.ev_pivot_end = false;
+        Serial.printf("[PIVOT->RUN] t=%.3fs z=%.1fmm\n", brain.ev_pv_t, brain.ev_pv_z);
     }
     unsigned long nowMs = millis();
     if (nowMs - lastTelemetryMillis >= 120 && Serial.availableForWrite() > 64) {
