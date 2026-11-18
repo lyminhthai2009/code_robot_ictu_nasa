@@ -1043,15 +1043,15 @@ static uint16_t bb_n = 0;
 static bool     bb_run_finished = false;
 static bool     bb_auto_dumped  = false;
 
-static void bbRecord(const SensorData& sd, int pl, int pr) {
+static void bbRecord(float elapsed_sec, const float* ir, int pl, int pr) {
     if (bb_n >= BB_N) return;
     BBRec& r = bb_buf[bb_n++];
-    r.t10 = (uint16_t)clampf(sd.elapsed_sec * 100.0f, 0.0f, 65535.0f);
+    r.t10 = (uint16_t)clampf(elapsed_sec * 100.0f, 0.0f, 65535.0f);
     r.x10 = (int16_t)clampf(brain.x * 10.0f, -32000.0f, 32000.0f);
     r.u   = (int16_t)brain.u_cmd;
     r.pl  = (int16_t)pl;
     r.pr  = (int16_t)pr;
-    for (int i = 0; i < 4; i++) r.s[i] = (uint8_t)clampf(sd.ir[i] * 255.0f, 0.0f, 255.0f);
+    for (int i = 0; i < 4; i++) r.s[i] = (uint8_t)clampf(ir[i] * 255.0f, 0.0f, 255.0f);
     r.v          = (uint8_t)clampf(brain.v_cmd, 0.0f, 255.0f);
     r.mode_cross = (uint8_t)(((uint8_t)brain.mode & 0x0F) | (((uint8_t)brain.cross_count & 0x0F) << 4));
     r.cm         = (uint8_t)clampf(floor_cm * 255.0f, 0.0f, 255.0f);
@@ -1369,7 +1369,7 @@ void loop() {
             bb_run_finished = false;
             bb_auto_dumped  = false;
         }
-        if ((loopFrameCount % 10) == 0) bbRecord(sData, pwm_l, pwm_r);
+        if ((loopFrameCount % 10) == 0) bbRecord(sData.elapsed_sec, sData.ir, pwm_l, pwm_r);
     } else if (brain.was_lifted) {
         if (bb_n > 25) bb_run_finished = true;
         if (!bb_auto_dumped && bb_n > 25 && Serial) {
