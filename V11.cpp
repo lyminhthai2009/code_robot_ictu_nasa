@@ -33,6 +33,12 @@
 #include "soc/rtc_cntl_reg.h"
 #endif
 
+struct SensorData {
+    float ir[4];      // 0.0 = trắng, 1.0 = đen
+    int   raw_ir[4];
+    float elapsed_sec;
+};
+
 // ============================================================================
 // 1. CẤU HÌNH CHIẾN THUẬT
 // ============================================================================
@@ -233,12 +239,6 @@ static inline int   sgn(float v) { return (v >= 0.0f) ? 1 : -1; }
 static inline int darker(int a, int ref)    { return IR_POL * (a - ref); }
 static inline int darkerOf(int a, int b)    { return (darker(a, b) >= 0) ? a : b; }
 static inline int brighterOf(int a, int b)  { return (darker(a, b) <= 0) ? a : b; }
-
-struct SensorData {
-    float ir[4];      // 0.0 = trắng, 1.0 = đen
-    int   raw_ir[4];
-    float elapsed_sec;
-};
 
 static void mixWheels(float v, float u, float f_in, float& vl, float& vr) {
     float a_max = 0.5f * (255.0f - f_in);
