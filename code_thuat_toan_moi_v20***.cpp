@@ -1,22 +1,15 @@
-// ============================================================================
-// COBOT LINE FOLLOWER VIP v7.3 - DUAL-ZONE GRIP + MAX SPEED + ZERO-SAG
-// Target  : ESP32-C3 (KM-11-102 + KMM-11-100), USB CDC On Boot: Enabled
-// Contest : Duong toi Tan Cuong Thai Nguyen 2026 (Vong Bang & Vong Chung Ket)
-// ============================================================================
 #include <Arduino.h>
 #include <math.h>
 #if defined(ESP32)
 #include "driver/gpio.h"
 #endif
 
-// ==================== CAU HINH CHE DO ====================
-#define ENABLE_SHORTCUT          1   // 1 = re tat phai 90 do tai Vong tron 2
-#define ENABLE_FLOOR_TRACK       1   // 1 = tu thich ung nen mau / anh sang san dau
-#define ENABLE_BOOT_CHIRP        1   // 1 = keu "tit" nhe bao boot sach
-#define ENABLE_BLACKBOX          1   // Dat 0 ngay thi dau chinh thuc
+#define ENABLE_SHORTCUT          1
+#define ENABLE_FLOOR_TRACK       1
+#define ENABLE_BOOT_CHIRP        1
+#define ENABLE_BLACKBOX          1
 #define ENABLE_SERIAL_TELEMETRY  0
 
-// ==================== PHAN CUNG (CHUAN XE BAN) ====================
 #define PWM_PIN_L_A   2
 #define PWM_PIN_L_B   10
 #define PWM_PIN_R_A   6
@@ -34,8 +27,8 @@
 #define IR_LED_ON     21
 
 static const int   PIN_IR[4]          = { SENSOR_1_PIN, SENSOR_2_PIN, SENSOR_3_PIN, SENSOR_4_PIN };
-static const int   MIN_N20_PWM        = 34;     // Bu vung chet GA12-N20
-static const float RIGHT_MOTOR_TRIM   = 1.00f;  // Chinh 0.96..1.04 neu lech co khi
+static const int   MIN_N20_PWM        = 34;
+static const float RIGHT_MOTOR_TRIM   = 1.00f;
 static const bool  INVERT_LEFT_MOTOR  = false;
 static const bool  INVERT_RIGHT_MOTOR = false;
 static const bool  SWAP_MOTORS_LR     = false;
@@ -53,18 +46,16 @@ static const int ADC_WHITE_NOM = 300;
 static const int ADC_BLACK_NOM = 2400;
 #endif
 
-// ==================== HINH HOC THUC TE CUA XE BAN ====================
-static const float TRACK_WIDTH_MM     = 78.5f;  // 85mm - 6.5mm
+static const float TRACK_WIDTH_MM     = 78.5f;
 static const float SENSOR_X_MM[4]     = { -20.0f, -11.25f, 11.25f, 20.0f };
 static const float SENSOR_Y_MM[4]     = {  60.0f,  64.84f, 64.84f, 60.0f };
 static const float SENSOR_VORONOI[4]  = {  0.72f,   1.25f,  1.25f,  0.72f };
 static const float DEFAULT_LINE_W_MM  = 24.0f;
 static const float SPEED_MMPS_AT_255  = 535.0f;
 
-// ==================== TOC DO & BAM CUA 2 VUNG (CUA THUONG FULL / CUA GAP BAM CUNG) ====================
-static const float V_MAX              = 255.0f; // Duong thang & cua nhe FULL 255!
-static const float V_CORNER_MIN       = 250.0f; // Cua thuong van ghim sat 250-255!
-static const float V_BRAKE_MIN        = 192.0f; // Cua rat gap tu ha banh ngoai ve 192 de khong bay line!
+static const float V_MAX              = 255.0f;
+static const float V_CORNER_MIN       = 250.0f;
+static const float V_BRAKE_MIN        = 192.0f;
 static const float V_START            = 135.0f;
 static const float SOFT_START_S       = 0.11f;
 static const float ACC_UP             = 3200.0f;
@@ -74,20 +65,17 @@ static const float K_SPD_E            = 0.40f;
 static const float E_SPD_DEAD_MM      = 12.5f;
 static const float K_SPD_R            = 60.0f;
 
-// Banh trong: cua thuong giu >=50 (nhanh + muot), cua gap ha thang ve 0 (ban kinh R=39mm, 0 plugging!)
 static const float F_IN_MIN           = 50.0f;
-static const float F_IN_EMERG         = 0.0f;   // Khong bao gio dao chieu khi con tren line -> 0 sut ap!
-static const float F_IN_LOST          = -26.0f; // Chi lui nhe khi mat han line de keo ve tuc thi
+static const float F_IN_EMERG         = 0.0f;
+static const float F_IN_LOST          = -26.0f;
 
-// ==================== DIEU KHIEN LAI 2 VUNG (EM O TAM - BAM CUNG O MEP CUA) ====================
-static const float KP                 = 3.15f;  // Em o duong thang & cua thuong
-static const float KP_NL_MM           = 19.5f;  // Tang vot luc keo khi |x| > 11mm (cua gap!)
-static const float KP_NL_QUAD         = 0.32f;  // Thanh phan bac 2 bat chat mep cua gap
+static const float KP                 = 3.15f;
+static const float KP_NL_MM           = 19.5f;
+static const float KP_NL_QUAD         = 0.32f;
 static const float KD                 = 0.28f;
 static const float KD_NL              = 0.24f;
 static const float KD_NL_VX           = 300.0f;
 
-// Smart Curvature Feedforward (don cua muot + xa sieu nhanh luc thoat cua S)
 static const float KI_CURVE           = 18.0f;
 static const float I_MAX              = 58.0f;
 static const float I_LEAK_TAU         = 0.42f;
@@ -97,7 +85,6 @@ static const float I_LEAK_WRONG       = 12.0f;
 static const float I_DEAD_MM          = 2.5f;
 static const float I_ACTIVE_MM        = 20.0f;
 
-// Loc Alpha-Beta + do vi tri 2D
 static const float AB_ALPHA           = 0.36f;
 static const float AB_BETA            = 0.042f;
 static const float JUMP_MM            = 26.0f;
@@ -107,19 +94,17 @@ static const float WSUM_MIN           = 0.035f;
 static const float K_EXT_MM           = 10.2f;
 static const float X_LIM_MM           = 30.0f;
 
-// Du bao nguy co NHAY GAP DOI khi vao cua gap (bat som 3mm + phan xa 8ms!)
 static const float T_PRED             = 0.036f;
-static const float RISK_X0            = 10.5f;  // Bat dau mo quyen cua gap ngay tu 10.5mm!
+static const float RISK_X0            = 10.5f;
 static const float RISK_X1            = 20.5f;
 static const float T_PRED_V           = 0.038f;
 static const float RISK_V_X0          = 13.0f;
 static const float RISK_V_X1          = 22.0f;
-static const float RISK_TAU_UP        = 0.008f; // Phan xa cuc nhanh 8ms -> khong kip bay khoi cua!
+static const float RISK_TAU_UP        = 0.008f;
 static const float RISK_TAU_DN        = 0.060f;
-static const float U_SLEW_CALM        = 7200.0f;  // Em o cua thuong, khong bi tre pha!
-static const float U_SLEW_FAST        = 24000.0f; // Phan xa gan nhu tuc thi khi cua gap!
+static const float U_SLEW_CALM        = 7200.0f;
+static const float U_SLEW_FAST        = 24000.0f;
 
-// ==================== MAT VACH / GO GIAM TOC / DOC CAU ====================
 static const float GAP_X_MM           = 11.5f;
 static const float GAP_HOLD_MM        = 80.0f;
 static const float GAP_REACQ_MAX      = 0.14f;
@@ -127,19 +112,17 @@ static const float GAP_REACQ_MIN      = 0.34f;
 static const float V_GAP_MAX          = 250.0f;
 static const float V_LOST             = 175.0f;
 static const float U_LOST_MAX         = 148.0f;
-static const float LOST_RAMP_S        = 0.045f; // Keo ve line nhanh gap doi neu lo tuot mep!
+static const float LOST_RAMP_S        = 0.045f;
 static const float LOST_GIVEUP_S      = 1.25f;
 static const float LOST_PRED_T        = 0.026f;
 static const float REACQ_VX           = 125.0f;
 static const float REACQ_CALM_S       = 0.040f;
 
-// ==================== KHOI DONG "BAT CONG TAC -> THA XUONG" ====================
 static const float ARM_SETTLE_S       = 0.065f;
 static const float ARM_REARM_AIR_S    = 0.095f;
 static const int   ARM_STABLE_DELTA   = 230;
 static const int   START_SPAN_MIN     = 340;
 
-// ==================== NGA TU & BAN DO DIA DANH (VONG BANG + CHUNG KET) ====================
 static const float WING_ON             = 0.52f;
 static const float WING_OFF            = 0.34f;
 static const float WING_BASE_MAX       = 0.45f;
@@ -160,9 +143,8 @@ static const float MAP_LOOP1_MIN_YAW   = 2.80f;
 static const float MAP_LOOP1_MIN_MM    = 300.0f;
 static const float MAP_UTURN_MIN_YAW   = 2.05f;
 static const float MAP_UTURN_MIN_MM    = 320.0f;
-static const float ARM_AFTER_U_DIST_MM = 65.0f;  // Sau nay neu co go toi mau: tang len 250..320
+static const float ARM_AFTER_U_DIST_MM = 65.0f;
 
-// ==================== RE TAT "TURBO ACTIVE-BRAKE SNAP" TAI VONG TRON 2 ====================
 static const float P_ARC_OUTER         = 255.0f;
 static const float P_ARC_INNER_SNAP    = -118.0f;
 static const float ARC_BRAKE_MIN_S     = 0.024f;
@@ -180,7 +162,6 @@ static const float V_HANDOVER          = 230.0f;
 static const float F_IN_HANDOVER       = 10.0f;
 static const float U_MAX_HANDOVER      = 125.0f;
 
-// ==================== THICH UNG NEN & BO QUAN LY DONG THUC CHONG SUT AP ====================
 static const float CM_DEAD             = 0.05f;
 static const float CM_MAX              = 0.72f;
 static const float CM_TAU_UP           = 0.035f;
@@ -209,10 +190,9 @@ static const float BEMF_TAU_UP_S        = 0.058f;
 static const float BEMF_TAU_DN_S        = 0.044f;
 static const float BEMF_TAU_BRAKE_S     = 0.015f;
 static const float TRUE_I_SINGLE_MAX    = 146.0f;
-static const float TRUE_I_TOTAL_BUDGET  = 198.0f; // Giu 4xAA chong sut ap ra cua, duong thang van full 255!
+static const float TRUE_I_TOTAL_BUDGET  = 198.0f;
 static const int   REVERSE_PAUSE_TICKS  = 1;
 
-// ==================== TIEN ICH TOAN HOC ====================
 static inline float clampf(float v, float lo, float hi) { return (v < lo) ? lo : ((v > hi) ? hi : v); }
 static inline float max2f(float a, float b) { return (a > b) ? a : b; }
 static inline float min2f(float a, float b) { return (a < b) ? a : b; }
@@ -224,7 +204,6 @@ static inline int   darker(int a, int ref)   { return IR_POL * (a - ref); }
 static inline int   darkerOf(int a, int b)   { return (darker(a, b) >= 0) ? a : b; }
 static inline int   brighterOf(int a, int b) { return (darker(a, b) <= 0) ? a : b; }
 
-// ==================== KHOA CHAN MOTOR SIEU SOM (DIET LOI QUAY NGUOC LUC BOOT) ====================
 static inline void forceMotorPinsLowNow() {
 #if defined(ESP32)
     const gpio_num_t mp[4] = {
@@ -255,7 +234,6 @@ static void bootChirpPreLEDC() {
 #endif
 }
 
-// ==================== PHAN CUNG LEDC 5000 Hz CHUAN ====================
 static void setupMotorsHardware() {
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
     ledcAttachChannel(PWM_PIN_L_A, 5000, 8, CH_L_A);
@@ -280,7 +258,6 @@ static inline void writeLEDC(int channel, int pwm) {
 #endif
 }
 
-// ==================== BO QUAN LY DONG THUC + ACTIVE SHORT-BRAKE ====================
 static int   prev_log_pwm_l = 0, prev_log_pwm_r = 0;
 static int   zero_cross_hold_l = 0, zero_cross_hold_r = 0;
 static float bemf_l = 0.0f, bemf_r = 0.0f;
@@ -390,7 +367,6 @@ static void setMotorHardware(int pwm_l, int pwm_r, bool brake_l, bool brake_r, f
     else               { writeLEDC(CH_R_A, 0);    writeLEDC(CH_R_B, -hw_r); }
 }
 
-// ==================== CAU TRUC DU LIEU & MIXER ====================
 struct SensorData {
     float ir[4];
     int   raw_ir[4];
@@ -409,7 +385,6 @@ static void mixWheels(float v, float u, float f_in, float& vl, float& vr) {
     else           { vl = ve - a; vr = ve + a; }
 }
 
-// ==================== BO NAO DIEU KHIEN VIP v7.3 ====================
 class Brain {
 public:
     enum Mode : uint8_t {
@@ -518,7 +493,6 @@ public:
         if (!(dt > 0.0005f && dt < 0.02f)) dt = 0.002f;
         const float* s = sd.ir;
 
-        // 1. CHE DO CHO THA XUONG (M_ARMED)
         if (mode == M_ARMED) {
             if (rearm_hold_t > 0.0f) rearm_hold_t = max2f(0.0f, rearm_hold_t - dt);
 
@@ -565,7 +539,6 @@ public:
             return;
         }
 
-        // 2. KIEM TRA AN TOAN
         air_t = sd.in_air ? (air_t + dt) : 0.0f;
         float min_ir   = min4f(s[0], s[1], s[2], s[3]);
         bool real_line = hasRealLine(s, sd.frame_span);
@@ -589,14 +562,11 @@ public:
             if (off_track_t > LOST_GIVEUP_S) { resetToArmed(); rearm_hold_t = 0.30f; return; }
         } else off_track_t = 0.0f;
 
-        // 3. ODOMETRY
         launch_t += dt;
         updateOdometry(dt, hw_bemf_l, hw_bemf_r);
 
-        // 4. UOC LUONG & BAN DO
         if (mode == M_RUN) runEstimate(sd, dt);
 
-        // 5. XUAT LENH 2 BANH + ACTIVE BRAKE
         float vl = 0.0f, vr = 0.0f;
         switch (mode) {
             case M_RUN:        outRun(dt, vl, vr);                        break;
@@ -921,7 +891,6 @@ private:
 
             if (!handover) { f_in = F_IN_MIN + (F_IN_EMERG - F_IN_MIN) * risk_f; a_cap = 0.5f * (255.0f - f_in); }
 
-            // Do loi 2 vung: em o tam duong thang, tang vot luc keo khi dat ra mep cua gap!
             float L_gain = 63.0f / L_eff;
             float norm_e = ae / KP_NL_MM;
             float kp = KP * L_gain * (1.0f + norm_e + KP_NL_QUAD * norm_e * norm_e);
@@ -1085,7 +1054,6 @@ private:
     }
 };
 
-// ==================== BIEN TOAN CUC ====================
 Brain         brain;
 int           ir_white_cal[4]  = { ADC_WHITE_NOM, ADC_WHITE_NOM, ADC_WHITE_NOM, ADC_WHITE_NOM };
 int           ir_black_cal[4]  = { ADC_BLACK_NOM, ADC_BLACK_NOM, ADC_BLACK_NOM, ADC_BLACK_NOM };
@@ -1131,7 +1099,6 @@ static void commitArmedCalibration(const int bright_seen[4], const int dark_seen
     floor_cm = 0.0f; local_peak = 1.0f;
 }
 
-// ==================== BLACKBOX ====================
 #if ENABLE_BLACKBOX
 #define BB_N 4500
 struct BBRec {
@@ -1187,7 +1154,6 @@ bool     Blackbox::dumped      = false;
 bool     Blackbox::was_running = false;
 #endif
 
-// ==================== SETUP ====================
 void setup() {
     forceMotorPinsLowNow();
 #if defined(ESP32)
@@ -1224,7 +1190,6 @@ void setup() {
     startMicros = lastStepMicros = micros();
 }
 
-// ==================== LOOP 500 Hz ====================
 void loop() {
     unsigned long nowMicros  = micros();
     unsigned long diffMicros = nowMicros - lastStepMicros;
