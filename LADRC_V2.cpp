@@ -328,7 +328,7 @@ static void motorBeep(uint32_t freq_hz, uint32_t duration_ms) {
     digitalWrite(PIN_R_B, LOW);
 }
 
-static void playMelody(const NoteStep* notes, size_t count) {
+static void playMelody(const struct NoteStep* notes, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         if (notes[i].freq_hz > 0 && notes[i].play_ms > 0) {
             motorBeep(notes[i].freq_hz, notes[i].play_ms);
